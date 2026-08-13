@@ -4,7 +4,7 @@ import plotly.express as px
 import re
 
 # -----------------------------------------------------------------------------
-# 1. CONFIGURAÇÃO DA PÁGINA E ESTILOS CSS (FONTES AMPLIADAS)
+# 1. CONFIGURAÇÃO DA PÁGINA E ESTILOS CSS
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Gestão de Pagamentos Diários - Kaffa Zig",
@@ -13,10 +13,10 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Aplicar fontes grandes para métricas, rótulos e títulos
+# Estilização CSS para ampliar fontes de métricas e títulos
 st.markdown("""
 <style>
-    /* Métricas de topo ampliadas e destacadas */
+    /* Métricas do topo ampliadas */
     [data-testid="stMetricValue"] {
         font-size: 34px !important;
         font-weight: 800 !important;
@@ -38,65 +38,89 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# URL OFICIAL DA SUA PLANILHA PUBLICADA EM CSV
 DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTHTcIZo4KnPLnZCWF20XbR4pRnRXYzKDEqYVQ82kYaR_dOl1MiESgbsdxHMX8ze7N13dSv6IQqAYu6/pub?gid=1963638500&single=true&output=csv"
 
+def obter_serie(df, col_name):
+    """Extrai com segurança uma coluna como Series, mesmo se houver duplicidade."""
+    if col_name not in df.columns:
+        return None
+    res = df[col_name]
+    if isinstance(res, pd.DataFrame):
+        return res.iloc[:, 0]
+    return res
+
 # -----------------------------------------------------------------------------
-# 2. LEITURA E TRATAMENTO AUTOMÁTICO DOS DADOS
+# 2. CARREGAMENTO E TRATAMENTO À PROVA DE ERROS
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=5)
 def carregar_dados():
     sheet_url = st.secrets.get("google_sheet_url", DEFAULT_SHEET_URL)
     
+    # Se for um link padrão de edição, converte para exportação CSV
+    if "/pub" not in sheet_url and "export?format=csv" not in sheet_url:
+        match = re.search(r"/d/([a-zA-Z0-9-_]+)", sheet_url)
+        if match:
+            sheet_id = match.group(1)
+            sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+
     try:
-        # Lê o CSV publicado diretamente sem passar por redirecionamento do Drive
         df = pd.read_csv(sheet_url)
     except Exception as e:
-        st.error(f"Erro de conexão com a planilha pública: {e}")
+        st.error(f"Erro ao carregar dados da planilha: {e}")
         return pd.DataFrame()
-        
-    if df.empty:
-        return df
 
-    # Limpar linhas totalmente em branco
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    # Remover linhas totalmente vazias
     df = df.dropna(how='all')
 
-    # Mapeamento flexível das colunas da planilha
-    col_renames = {}
+    # Mapeamento com trava contra duplicidade de colunas
+    col_map = {}
+    usados = set()
     for col in df.columns:
-        c_lower = str(col).strip().lower()
-        if 'carimbo' in c_lower:
-            col_renames[col] = 'Carimbo de data/hora'
-        elif 'data' in c_lower:
-            col_renames[col] = 'Data'
-        elif 'categoria' in c_lower:
-            col_renames[col] = 'Categoria'
-        elif 'descri' in c_lower:
-            col_renames[col] = 'Descrição breve'
-        elif 'valor' in c_lower:
-            col_renames[col] = 'Valor'
-        elif 'metodo' in c_lower or 'método' in c_lower or 'pagamento' in c_lower:
-            col_renames[col] = 'Método de pagamento'
-        elif 'essencial' in c_lower or 'superfluo' in c_lower or 'supérfluo' in c_lower or 'grada' in c_lower:
-            col_renames[col] = 'Essencial x Supérfluo'
+        c_low = str(col).strip().lower()
+        if 'carimbo' in c_low and 'Carimbo' not in usados:
+            col_map[col] = 'Carimbo de data/hora'
+            usados.add('Carimbo')
+        elif 'data' in c_low and 'carimbo' not in c_low and 'Data' not in usados:
+            col_map[col] = 'Data'
+            usados.add('Data')
+        elif 'valor' in c_low and 'Valor' not in usados:
+            col_map[col] = 'Valor'
+            usados.add('Valor')
+        elif 'categoria' in c_low and 'Categoria' not in usados:
+            col_map[col] = 'Categoria'
+            usados.add('Categoria')
+        elif ('metodo' in c_low or 'método' in c_low or 'pagamento' in c_low) and 'Método de pagamento' not in usados:
+            col_map[col] = 'Método de pagamento'
+            usados.add('Método de pagamento')
+        elif ('essencial' in c_low or 'superfluo' in c_low or 'supérfluo' in c_low or 'grada' in c_low) and 'Essencial x Supérfluo' not in usados:
+            col_map[col] = 'Essencial x Supérfluo'
+            usados.add('Essencial x Supérfluo')
 
-    df = df.rename(columns=col_renames)
+    df = df.rename(columns=col_map)
 
-    # Tratamento da Coluna Data
-    if 'Data' in df.columns:
-        datas_str = df['Data'].astype(str).str.strip()
+    # Tratamento da coluna Data
+    serie_data = obter_serie(df, 'Data')
+    if serie_data is not None:
+        datas_str = serie_data.astype(str).str.strip()
         df['Data_Formatada'] = pd.to_datetime(datas_str, format='%d/%m/%Y', errors='coerce')
-        nat_mask = df['Data_Formatada'].isna()
-        if nat_mask.any():
-            df.loc[nat_mask, 'Data_Formatada'] = pd.to_datetime(df.loc[nat_mask, 'Data'], dayfirst=True, errors='coerce')
+        mask_na = df['Data_Formatada'].isna()
+        if mask_na.any():
+            df.loc[mask_na, 'Data_Formatada'] = pd.to_datetime(serie_data[mask_na], dayfirst=True, errors='coerce')
 
-    # Tratamento da Coluna Valor (R$, $, vírgula e ponto)
-    if 'Valor' in df.columns:
+    # Tratamento da coluna Valor
+    serie_valor = obter_serie(df, 'Valor')
+    if serie_valor is not None:
         def parse_valor(v):
-            if pd.isna(v): return 0.0
-            if isinstance(v, (int, float)): return float(v)
+            if pd.isna(v):
+                return 0.0
+            if isinstance(v, (int, float)):
+                return float(v)
             v_str = re.sub(r'[^\d,.-]', '', str(v).strip())
-            if not v_str: return 0.0
+            if not v_str:
+                return 0.0
             if ',' in v_str and '.' in v_str:
                 v_str = v_str.replace('.', '').replace(',', '.')
             elif ',' in v_str:
@@ -106,21 +130,21 @@ def carregar_dados():
             except:
                 return 0.0
 
-        df['Valor Numérico'] = df['Valor'].apply(parse_valor)
+        df['Valor Numérico'] = serie_valor.apply(parse_valor)
     else:
         df['Valor Numérico'] = 0.0
 
     return df
 
 # -----------------------------------------------------------------------------
-# 3. INTERFACE PRINCIPAL E PAINEL (DASHBOARD)
+# 3. INTERFACE PRINCIPAL E DASHBOARD
 # -----------------------------------------------------------------------------
 st.title("📊 Gestão de Pagamentos Diários")
 
 df = carregar_dados()
 
 if df.empty:
-    st.warning("Não foi possível carregar os dados. Verifique a conexão com a planilha.")
+    st.warning("Não foi possível carregar os dados da planilha.")
 else:
     # --- BARRA LATERAL ---
     st.sidebar.image("https://img.icons8.com/color/96/000000/google-sheets.png", width=55)
@@ -130,7 +154,7 @@ else:
         st.cache_data.clear()
         st.rerun()
 
-    # Link do Google Forms
+    # Link do Google Forms (opcional)
     st.sidebar.divider()
     form_url = st.secrets.get("google_form_url", "")
     if form_url:
@@ -173,7 +197,7 @@ else:
 
     st.markdown("---")
 
-    # --- GRÁFICOS (AZUL MARCANTE E RÓTULOS EM DESTAQUE) ---
+    # --- GRÁFICOS (AZUL MARCANTE E VALORES EM DESTAQUE) ---
     col_g1, col_g2 = st.columns([1.5, 1])
 
     with col_g1:
@@ -193,7 +217,7 @@ else:
             fig_bar.update_traces(
                 texttemplate='R$ %{text:,.2f}',
                 textposition='outside',
-                textfont=dict(size=16, color='#ffffff', family='Arial Black') # FONTE GRANDE SOBRE AS BARRAS
+                textfont=dict(size=16, color='#ffffff', family='Arial Black')
             )
             fig_bar.update_layout(
                 font=dict(size=14),
