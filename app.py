@@ -4,6 +4,9 @@ import gspread
 from google.oauth2.service_account import Credentials
 from datetime import datetime
 import plotly.express as px
+import json
+import tempfile
+import os
 
 # -----------------------------------------------------------------------------
 # 1. CONFIGURAÇÃO DA PÁGINA
@@ -16,7 +19,7 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# 2. CONEXÃO COM GOOGLE SHEETS
+# 2. CONEXÃO ULTRA-ROBUSTA COM GOOGLE SHEETS
 # -----------------------------------------------------------------------------
 @st.cache_resource
 def get_google_sheet():
@@ -25,17 +28,36 @@ def get_google_sheet():
         "https://www.googleapis.com/auth/drive"
     ]
     
-    # Converte o AttrDict do Streamlit em um dicionário nativo do Python
-    service_account_info = dict(st.secrets["gcp_service_account"])
+    # Extrai o dicionário das credenciais
+    info = dict(st.secrets["gcp_service_account"])
     
-    # Tratamento automático para quebras de linha na chave privada RSA
-    if "private_key" in service_account_info:
-        service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+    # TRATAMENTO RIGOROSO DA CHAVE PRIVADA
+    if "private_key" in info:
+        pk = str(info["private_key"]).strip()
+        # Remove aspas duplas/simples externas acidentais
+        if (pk.startswith('"') and pk.endswith('"')) or (pk.startswith("'") and pk.endswith("'")):
+            pk = pk[1:-1]
+        # Converte caracteres de escape \\n para quebras reais de linha \n
+        pk = pk.replace("\\n", "\n")
+        info["private_key"] = pk
+
+    # TENTATIVA 1: Carregamento direto por Dicionário Tratado
+    try:
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+    except Exception:
+        # TENTATIVA 2 (FALLBACK DE ALTA CONFIABILIDADE): Arquivo JSON Temporário
+        # Garante que a estrutura física do JSON seja reconstruída e lida nativamente
+        with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json') as temp_json:
+            json.dump(info, temp_json)
+            temp_path = temp_json.name
+            
+        try:
+            creds = Credentials.from_service_account_file(temp_path, scopes=scopes)
+        finally:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
     
-    creds = Credentials.from_service_account_info(service_account_info, scopes=scopes)
     client = gspread.authorize(creds)
-    
-    # Abre a planilha pela URL configurada nos secrets
     sheet = client.open_by_url(st.secrets["google_sheet_url"]).sheet1
     return sheet
 
@@ -132,7 +154,6 @@ if not df.empty and 'Data_Formatada' in df.columns and not df['Data_Formatada'].
         df_filtrado = df
 else:
     df_filtrado = df
-
 
 # -----------------------------------------------------------------------------
 # 4. PAINEL PRINCIPAL (DASHBOARD)
