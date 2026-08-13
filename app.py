@@ -3,11 +3,17 @@ import pandas as pd
 import plotly.express as px
 import re
 from datetime import datetime
-import gspread
-from google.oauth2.service_account import Credentials
+
+# Importações de escrita com tratamento de exceção seguro
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    HAS_GSPREAD = True
+except ImportError:
+    HAS_GSPREAD = False
 
 # -----------------------------------------------------------------------------
-# 1. CONFIGURAÇÃO DA PÁGINA
+# 1. CONFIGURAÇÃO DA PÁGINA E ESTILOS CSS PARA AUMENTAR TEXTOS
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Gestão de Pagamentos Diários - Kaffa Zig",
@@ -16,16 +22,44 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Link padrão da sua planilha
+# Estilização CSS para aumentar fontes de títulos, métricas e avisos
+st.markdown("""
+<style>
+    /* Aumentar o tamanho das métricas de topo */
+    [data-testid="stMetricValue"] {
+        font-size: 32px !important;
+        font-weight: 700 !important;
+        color: #38bdf8 !important;
+    }
+    [data-testid="stMetricLabel"] {
+        font-size: 16px !important;
+        font-weight: 600 !important;
+        color: #94a3b8 !important;
+    }
+    /* Aumentar fonte das subseções e títulos */
+    .stMarkdown h3 {
+        font-size: 22px !important;
+        font-weight: 700 !important;
+    }
+    /* Ajustes na barra lateral */
+    .stSidebar label {
+        font-size: 15px !important;
+        font-weight: 600 !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1NJ4sLPZ1VHxmpSOyqMw7cXfIJBl9yaVVok1QQofHs1Q/edit?usp=sharing"
 
 # -----------------------------------------------------------------------------
 # 2. FUNÇÃO DE SALVAMENTO VIA GSPREAD (SE HOUVER SECRETS CONFIGURADO)
 # -----------------------------------------------------------------------------
 def salvar_via_gspread(dados_dict):
+    if not HAS_GSPREAD:
+        return False, "Bibliotecas de escrita não instaladas."
     try:
         if "gcp_service_account" not in st.secrets:
-            return False, "Para salvar direto pelo app, configure a chave de Service Account nos Secrets ou utilize o formulário do Google."
+            return False, "Credenciais de escrita não configuradas nos Secrets. Registre via Google Forms."
             
         info = dict(st.secrets["gcp_service_account"])
         if "private_key" in info:
@@ -40,7 +74,6 @@ def salvar_via_gspread(dados_dict):
         sheet_url = st.secrets.get("google_sheet_url", DEFAULT_SHEET_URL)
         sheet = client.open_by_url(sheet_url).sheet1
         
-        # Colunas: Carimbo, Data, Categoria, Descrição, Valor, Método, Essencial x Supérfluo
         linha = [
             datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
             dados_dict['data'],
@@ -52,19 +85,20 @@ def salvar_via_gspread(dados_dict):
         ]
         
         sheet.append_row(linha, value_input_option="USER_ENTERED")
-        return True, "Lançamento registrado com sucesso na planilha!"
+        return True, "Lançamento registrado com sucesso!"
     except Exception as e:
         return False, f"Aviso de escrita: {e}"
 
 # -----------------------------------------------------------------------------
-# 3. LEITURA E TRATAMENTO DOS DADOS DA PLANILHA
+# 3. LEITURA ULTRA-ROBUSTA VIA GOOGLE GVIZ (EVITA ERRO DE ARQUIVO INEXISTENTE)
 # -----------------------------------------------------------------------------
 def obter_csv_url(sheet_url):
     pattern = r"/d/([a-zA-Z0-9-_]+)"
     match = re.search(pattern, sheet_url)
     if match:
         sheet_id = match.group(1)
-        return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+        # Endereço GViz: Não falha com 404 e é imune ao erro de Drive
+        return f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv"
     return sheet_url
 
 @st.cache_data(ttl=5)
@@ -81,10 +115,10 @@ def carregar_dados():
     if df.empty:
         return df
 
-    # Remove linhas completamente nulas
+    # Limpar linhas nulas
     df = df.dropna(how='all')
 
-    # Mapeamento flexível dos cabeçalhos da sua planilha
+    # Mapeamento flexível das colunas da sua planilha
     col_renames = {}
     for col in df.columns:
         c_lower = str(col).strip().lower()
@@ -105,7 +139,7 @@ def carregar_dados():
 
     df = df.rename(columns=col_renames)
 
-    # Tratamento da Coluna Data
+    # Tratar a coluna Data
     if 'Data' in df.columns:
         datas_str = df['Data'].astype(str).str.strip()
         df['Data_Formatada'] = pd.to_datetime(datas_str, format='%d/%m/%Y', errors='coerce')
@@ -113,7 +147,7 @@ def carregar_dados():
         if nat_mask.any():
             df.loc[nat_mask, 'Data_Formatada'] = pd.to_datetime(df.loc[nat_mask, 'Data'], dayfirst=True, errors='coerce')
 
-    # Tratamento da Coluna Valor (R$, $, vírgulas e pontos)
+    # Tratar a coluna Valor
     if 'Valor' in df.columns:
         def parse_valor(v):
             if pd.isna(v):
@@ -149,14 +183,14 @@ if df.empty:
     st.warning("A planilha não possui dados registrados no momento.")
 else:
     # --- BARRA LATERAL ---
-    st.sidebar.image("https://img.icons8.com/color/96/000000/google-sheets.png", width=50)
+    st.sidebar.image("https://img.icons8.com/color/96/000000/google-sheets.png", width=55)
     st.sidebar.title("Kaffa Zig Gestão")
 
     if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-    # --- NOVO LANÇAMENTO NO PRÓPRIO APP ---
+    # --- NOVO LANÇAMENTO ---
     st.sidebar.divider()
     with st.sidebar.expander("➕ Inserir Lançamento no App"):
         with st.form("form_novo_gasto", clear_on_submit=True):
@@ -190,7 +224,7 @@ else:
                 else:
                     st.info(msg)
 
-    # Link do Google Forms (opcional)
+    # Link para Google Forms (opcional)
     form_url = st.secrets.get("google_form_url", "")
     if form_url:
         st.sidebar.link_button("📋 Abrir Google Forms", form_url, use_container_width=True)
@@ -220,7 +254,7 @@ else:
     else:
         df_filtrado = df
 
-    # --- MÉTRICAS ---
+    # --- MÉTRICAS DE TOPO COM FONTE AMPLIADA ---
     total_gasto = df_filtrado['Valor Numérico'].sum()
     qtd_pagamentos = len(df_filtrado[df_filtrado['Valor Numérico'] > 0])
     media_pagamento = total_gasto / qtd_pagamentos if qtd_pagamentos > 0 else 0.0
@@ -232,7 +266,7 @@ else:
 
     st.markdown("---")
 
-    # --- GRÁFICOS ---
+    # --- GRÁFICOS COM FONTES GRANDES E COR AZUL ---
     col_g1, col_g2 = st.columns([1.5, 1])
 
     with col_g1:
@@ -240,16 +274,28 @@ else:
         if 'Categoria' in df_filtrado.columns and not df_filtrado.empty:
             df_cat = df_filtrado.groupby('Categoria', as_index=False)['Valor Numérico'].sum()
             df_cat = df_cat.sort_values(by='Valor Numérico', ascending=False)
+            
             fig_bar = px.bar(
                 df_cat,
                 x='Categoria',
                 y='Valor Numérico',
                 text='Valor Numérico',
                 template="plotly_dark",
-                color_discrete_sequence=['#3b82f6']  # AZUL
+                color_discrete_sequence=['#3b82f6']  # AZUL MARCANTE
             )
-            fig_bar.update_traces(texttemplate='R$ %{text:.2f}', textposition='outside')
-            fig_bar.update_layout(yaxis_title="R$", xaxis_title="")
+            
+            # Aumentar tamanho dos valores acima das barras e dos eixos
+            fig_bar.update_traces(
+                texttemplate='R$ %{text:,.2f}', 
+                textposition='outside',
+                textfont=dict(size=16, color='#ffffff', family='Arial Black') # FONTE GRANDE SOBRE AS BARRAS
+            )
+            fig_bar.update_layout(
+                font=dict(size=14),
+                xaxis=dict(title="", tickfont=dict(size=14, color='#f8fafc')),
+                yaxis=dict(title="R$", title_font=dict(size=16), tickfont=dict(size=14)),
+                height=420
+            )
             st.plotly_chart(fig_bar, use_container_width=True)
 
     with col_g2:
@@ -257,6 +303,7 @@ else:
         if 'Essencial x Supérfluo' in df_filtrado.columns and not df_filtrado.empty:
             df_grad = df_filtrado.groupby('Essencial x Supérfluo', as_index=False)['Valor Numérico'].sum()
             df_grad['Essencial x Supérfluo'] = df_grad['Essencial x Supérfluo'].astype(str)
+            
             fig_pie = px.pie(
                 df_grad,
                 names='Essencial x Supérfluo',
@@ -265,12 +312,23 @@ else:
                 template="plotly_dark",
                 color_discrete_sequence=['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6']
             )
+            
+            # Aumentar tamanho dos rótulos e legendas do gráfico de rosca
+            fig_pie.update_traces(
+                textinfo='percent+label',
+                textfont=dict(size=15, color='#ffffff')
+            )
+            fig_pie.update_layout(
+                font=dict(size=14),
+                legend=dict(font=dict(size=14)),
+                height=420
+            )
             st.plotly_chart(fig_pie, use_container_width=True)
 
     st.markdown("---")
 
-    # --- TABELA DE EXIBIÇÃO ---
+    # --- TABELA DE DADOS ---
     st.subheader("📋 Lançamentos do Período")
     cols_to_hide = ['Data_Formatada', 'Valor Numérico']
     cols_display = [c for c in df_filtrado.columns if c not in cols_to_hide]
-    st.dataframe(df_filtrado[cols_display], use_container_width=True, hide_index=True)
+    st.dataframe(df_filtrado[cols_display], use_container_width=True, hide_index=True, height=350)
