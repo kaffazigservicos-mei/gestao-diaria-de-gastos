@@ -1,319 +1,171 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import re
 import gspread
+from google.oauth2.service_account import Credentials
+from datetime import datetime
+import plotly.express as px
 
-# ==========================================
-# 1. Configuração da Página e Estilo
-# ==========================================
+# -----------------------------------------------------------------------------
+# 1. CONFIGURAÇÃO DA PÁGINA
+# -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Gestão de Pagamentos Diários",
-    page_icon="💰",
-    layout="wide"
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-st.markdown("""
-<style>
-    .metric-card {
-        background-color: #f8f9fa;
-        border-left: 5px solid #1E88E5;
-        padding: 15px;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
-    }
-    .metric-value {
-        font-size: 24px;
-        font-weight: bold;
-        color: #212529;
-    }
-    .metric-label {
-        font-size: 14px;
-        color: #6c757d;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# ==========================================
-# 2. Funções de Conexão e Tratamento de Dados
-# ==========================================
-def format_brl(val):
-    """Formata valores numéricos para o padrão de moeda brasileiro (R$)."""
-    try:
-        if pd.isna(val) or val is None:
-            return "R$ 0,00"
-        return f"R$ {float(val):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-    except Exception:
-        return "R$ 0,00"
-
-def clean_currency_to_float(series):
-    """Converte valores em texto (com R$, pontos e vírgulas) para float."""
-    def convert_val(v):
-        if pd.isna(v):
-            return 0.0
-        s = str(v).strip()
-        s = re.sub(r'[^\d,.-]', '', s)
-        if not s:
-            return 0.0
-        if ',' in s and '.' in s:
-            s = s.replace('.', '').replace(',', '.')
-        elif ',' in s:
-            s = s.replace(',', '.')
-        try:
-            return float(s)
-        except ValueError:
-            return 0.0
-
-    return series.apply(convert_val)
-
+# -----------------------------------------------------------------------------
+# 2. CONEXÃO COM GOOGLE SHEETS
+# -----------------------------------------------------------------------------
 @st.cache_resource
-def get_gspread_client():
-    """Autentica no Google Sheets usando o TOML salvo nas Secrets do Streamlit."""
-    try:
-        # Busca as credenciais sob a chave [gcp_service_account]
-        if "gcp_service_account" in st.secrets:
-            creds_dict = dict(st.secrets["gcp_service_account"])
+def get_google_sheet():
+    # As credenciais devem estar no st.secrets do Streamlit Cloud
+    # (Formato JSON da Service Account)
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+    client = gspread.authorize(creds)
+    
+    # URL ou ID da planilha configurado nos secrets
+    sheet = client.open_by_url(st.secrets["google_sheet_url"]).sheet1
+    return sheet
+
+@st.cache_data(ttl=10) # Atualiza o cache a cada 10 segundos
+def carregar_dados():
+    sheet = get_google_sheet()
+    dados = sheet.get_all_records()
+    df = pd.DataFrame(dados)
+    
+    if not df.empty:
+        # Converter a coluna Data para o formato datetime do Pandas para facilitar o filtro
+        df['Data_Formatada'] = pd.to_datetime(df['Data'], format='%d/%m/%Y', errors='coerce')
+        
+        # Limpar a coluna Valor caso tenha vindo como string com "R$" ou "$"
+        if df['Valor'].dtype == object:
+            df['Valor Numérico'] = df['Valor'].astype(str).str.replace('R$', '', regex=False)
+            df['Valor Numérico'] = df['Valor Numérico'].str.replace('$', '', regex=False)
+            df['Valor Numérico'] = df['Valor Numérico'].str.replace('.', '', regex=False)
+            df['Valor Numérico'] = df['Valor Numérico'].str.replace(',', '.', regex=False)
+            df['Valor Numérico'] = pd.to_numeric(df['Valor Numérico'], errors='coerce')
         else:
-            creds_dict = dict(st.secrets)
-
-        # Trata quebras de linha na chave privada
-        if "private_key" in creds_dict:
-            creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
-
-        return gspread.service_account_from_dict(creds_dict)
-    except Exception as e:
-        st.sidebar.error(f"Erro na autenticação dos Secrets: {e}")
-        return None
-
-@st.cache_data(ttl=10)
-def load_data(url_or_path):
-    """Carrega o CSV da planilha do Google Sheets."""
-    url = url_or_path.strip()
-    if "/edit" in url:
-        url = url.split("/edit")[0] + "/export?format=csv"
-    elif "docs.google.com" in url and not url.endswith("format=csv"):
-        url = url + "/export?format=csv"
-
-    df = pd.read_csv(url)
-    df.columns = df.columns.str.strip()
+            df['Valor Numérico'] = pd.to_numeric(df['Valor'], errors='coerce')
+            
     return df
 
-# ==========================================
-# 3. Sidebar - Configurações, Formulário e Filtros
-# ==========================================
-st.sidebar.title("⚙️ Gestão de Pagamentos")
+# -----------------------------------------------------------------------------
+# 3. INTERFACE LATERAL (FILTROS E NOVO LANÇAMENTO)
+# -----------------------------------------------------------------------------
+st.sidebar.image("https://img.icons8.com/color/96/000000/google-sheets.png", width=60)
+st.sidebar.title("Opções")
 
-# Busca o link padrão salvo em st.secrets (default_sheet_url)
-DEFAULT_URL = st.secrets.get("default_sheet_url", "")
+sheet = get_google_sheet()
+df = carregar_dados()
 
-sheet_url_input = st.sidebar.text_input(
-    "Link público do Google Sheets:",
-    value=DEFAULT_URL,
-    help="O link padrão é carregado automaticamente das Secrets. Altere caso queira conectar outra planilha."
-)
+# --- FORMULÁRIO DE INSERÇÃO CORRIGIDO ---
+with st.sidebar.expander("➕ Inserir Novo Lançamento"):
+    with st.form("novo_lancamento_form", clear_on_submit=True):
+        f_data = st.date_input("Data do Pagamento")
+        f_categoria = st.selectbox("Categoria", ["Alimentação", "Beleza", "Casa", "Doação", "Lazer", "Outros", "Presentes", "Saúde", "Transporte"])
+        f_descricao = st.text_input("Descrição breve")
+        
+        # Recebe o valor como número float (evita enviar a string "R$")
+        f_valor = st.number_input("Valor", min_value=0.01, format="%0.2f")
+        
+        # Textos EXATAMENTE iguais ao Forms para evitar desconfiguração
+        f_metodo = st.selectbox("Método de pagamento", ["Cartão crédito", "Cartão débito", "Pix", "Dinheiro"]) 
+        f_gradacao = st.slider("Gradação (1 - Supérfluo a 5 - Essencial)", 1, 5, 3)
+        
+        submit = st.form_submit_button("Salvar no Sheets")
+        
+        if submit:
+            # Prepara os dados. Note que f_valor vai como float!
+            nova_linha = [
+                datetime.now().strftime("%d/%m/%Y %H:%M:%S"), # Carimbo
+                f_data.strftime("%d/%m/%Y"),                  # Data
+                f_categoria,                                  # Categoria
+                f_descricao,                                  # Descrição breve
+                f_valor,                                      # VALOR PURO (numérico)
+                f_metodo,                                     # Método de pagamento
+                f_gradacao                                    # Essencial x Supérfluo
+            ]
+            
+            # O SEGREDO ESTÁ AQUI: USER_ENTERED força a planilha a formatar como moeda
+            sheet.append_row(nova_linha, value_input_option="USER_ENTERED")
+            st.success("Lançamento inserido com sucesso!")
+            st.cache_data.clear() # Limpa o cache para recarregar a tabela
+            st.rerun() # Recarrega a página
 
-if not sheet_url_input:
-    st.info("💡 **Para começar:** Cole o link público da sua planilha do Google Sheets no campo do menu lateral.")
-    st.stop()
-
-try:
-    df_raw = load_data(sheet_url_input)
-except Exception as err:
-    st.error(f"Erro ao carregar a planilha. Verifique as permissões de acesso. Detalhes: {err}")
-    st.stop()
-
-df = df_raw.copy()
-
-# Mapeamento Dinâmico de Colunas
-col_valor = next((c for c in df.columns if "valor" in c.lower()), None)
-col_cat = next((c for c in df.columns if "categoria" in c.lower() and "sub" not in c.lower()), None)
-col_essencial = next((c for c in df.columns if "essencial" in c.lower() or "supérfluo" in c.lower()), None)
-col_data = next((c for c in df.columns if "data" in c.lower() or "carimbo" in c.lower()), None)
-
-# Processa colunas principais
-if col_valor:
-    df["Valor_Num"] = clean_currency_to_float(df[col_valor])
+# --- FILTRO DE DATAS ---
+st.sidebar.divider()
+if not df.empty:
+    min_date = df['Data_Formatada'].min().date()
+    max_date = df['Data_Formatada'].max().date()
+    
+    st.sidebar.subheader("📅 Filtro de Datas")
+    data_inicio, data_fim = st.sidebar.date_input(
+        "Selecione o período",
+        value=[min_date, max_date],
+        min_value=min_date,
+        max_value=max_date
+    )
+    
+    # Aplicar o filtro no DataFrame
+    mask = (df['Data_Formatada'].dt.date >= data_inicio) & (df['Data_Formatada'].dt.date <= data_fim)
+    df_filtrado = df.loc[mask]
 else:
-    df["Valor_Num"] = 0.0
+    df_filtrado = pd.DataFrame()
 
-if col_data:
-    df["Data_Parsed"] = pd.to_datetime(df[col_data], errors="coerce")
 
-# --- NOVO REGISTRO (FORMULÁRIO NA SIDEBAR) ---
-st.sidebar.markdown("---")
-st.sidebar.subheader("➕ Novo Registro")
-
-categorias_base = ["Alimentação", "Moradia", "Transporte", "Saúde", "Educação", "Lazer", "Serviços", "Outros"]
-
-if col_cat and not df[col_cat].isna().all():
-    cats_planilha = [str(x).strip() for x in df[col_cat].unique() if pd.notna(x) and str(x).strip() != ""]
-    lista_categorias = list(dict.fromkeys(categorias_base + cats_planilha))
-else:
-    lista_categorias = categorias_base
-
-with st.sidebar.form(key="form_novo_registro", clear_on_submit=True):
-    nova_data = st.date_input("Data do Pagamento")
-    nova_cat = st.selectbox("Categoria", lista_categorias)
-    nova_desc = st.text_input("Descrição breve")
-    novo_valor = st.number_input("Valor (R$)", min_value=0.0, step=0.01, format="%.2f")
-    novo_metodo = st.selectbox("Método de pagamento", ["Pix", "Cartão de Crédito", "Cartão de Débito", "Dinheiro", "Boleto", "Outro"])
-    novo_essencial = st.selectbox("Essencial x Supérfluo (1 a 5)", [1, 2, 3, 4, 5], index=2, 
-                                  help="1: Muito Supérfluo | 5: Muito Essencial")
-
-    btn_salvar = st.form_submit_button("💾 Salvar Registro")
-
-if btn_salvar:
-    gc = get_gspread_client()
-    if gc is None:
-        st.sidebar.error("❌ Credenciais do Google Cloud não encontradas nos Secrets.")
-    else:
-        try:
-            sh = gc.open_by_url(sheet_url_input)
-            worksheet = sh.get_worksheet(0)
-            
-            carimbo = pd.Timestamp.now().strftime("%d/%m/%Y %H:%M:%S")
-            data_str = nova_data.strftime("%d/%m/%Y")
-            valor_formatted = f"R$ {novo_valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
-            
-            nova_linha = [carimbo, data_str, nova_cat, nova_desc, valor_formatted, novo_metodo, novo_essencial]
-            
-            worksheet.append_row(nova_linha)
-            st.sidebar.success("✅ Registro adicionado à planilha com sucesso!")
-            st.cache_data.clear()
-            st.rerun()
-        except Exception as e:
-            st.sidebar.error(f"❌ Erro ao gravar na planilha: {e}")
-
-# --- FILTROS DA SIDEBAR ---
-st.sidebar.markdown("---")
-st.sidebar.subheader("🔍 Filtros")
-
-if col_data and not df["Data_Parsed"].isna().all():
-    min_d = df["Data_Parsed"].min().date()
-    max_d = df["Data_Parsed"].max().date()
-    if min_d and max_d and min_d != max_d:
-        d_range = st.sidebar.date_input("Período:", [min_d, max_d])
-        if isinstance(d_range, (list, tuple)) and len(d_range) == 2:
-            df = df[(df["Data_Parsed"].dt.date >= d_range[0]) & (df["Data_Parsed"].dt.date <= d_range[1])]
-
-if col_cat:
-    cats = ["Todas"] + sorted([str(x) for x in df[col_cat].dropna().unique()])
-    sel_cat = st.sidebar.selectbox("Filtrar Categoria:", cats)
-    if sel_cat != "Todas":
-        df = df[df[col_cat] == sel_cat]
-
-# ==========================================
-# 4. Painel Principal - Métricas
-# ==========================================
+# -----------------------------------------------------------------------------
+# 4. PAINEL PRINCIPAL (DASHBOARD)
+# -----------------------------------------------------------------------------
 st.title("📊 Gestão de Pagamentos Diários")
 
-total_gasto = df["Valor_Num"].sum()
-total_registros = len(df)
-media_pagamento = total_gasto / total_registros if total_registros > 0 else 0.0
-
-col1, col2, col3 = st.columns(3)
-
-with col1:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-label">Total Gasto</div>
-        <div class="metric-value">{format_brl(total_gasto)}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-with col2:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-label">Total de Pagamentos</div>
-        <div class="metric-value">{total_registros}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-with col3:
-    st.markdown(f"""
-    <div class="metric-card">
-        <div class="metric-label">Média por Pagamento</div>
-        <div class="metric-value">{format_brl(media_pagamento)}</div>
-    </div>
-    """, unsafe_allow_html=True)
-
-st.markdown("<br>", unsafe_allow_html=True)
-
-# ==========================================
-# 5. Gráficos Interativos
-# ==========================================
-g1, g2 = st.columns(2)
-
-with g1:
-    st.subheader("Gastos por Categoria")
-    if col_cat and not df.empty:
-        df_cat = df.groupby(col_cat)["Valor_Num"].sum().reset_index()
-        fig_bar = px.bar(
-            df_cat,
-            x=col_cat,
-            y="Valor_Num",
-            labels={col_cat: "Categoria", "Valor_Num": "Valor (R$)"},
-            color="Valor_Num",
-            color_continuous_scale="Blues"
-        )
-        fig_bar.update_layout(yaxis_tickprefix="R$ ", showlegend=False)
+if not df_filtrado.empty:
+    
+    # --- MÉTRICAS DE TOPO ---
+    total_gasto = df_filtrado['Valor Numérico'].sum()
+    total_pagamentos = len(df_filtrado)
+    media_pagamento = df_filtrado['Valor Numérico'].mean()
+    
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric(label="Total Gasto", value=f"R$ {total_gasto:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+    with col2:
+        st.metric(label="Total de Pagamentos", value=total_pagamentos)
+    with col3:
+        st.metric(label="Média por Pagamento", value=f"R$ {media_pagamento:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        
+    st.markdown("---")
+    
+    # --- GRÁFICOS ---
+    col_chart1, col_chart2 = st.columns([1.5, 1])
+    
+    with col_chart1:
+        st.subheader("Gastos por Categoria")
+        df_cat = df_filtrado.groupby('Categoria')['Valor Numérico'].sum().reset_index()
+        fig_bar = px.bar(df_cat, x='Categoria', y='Valor Numérico', text_auto='.2s', template="plotly_dark", color_discrete_sequence=['#3b82f6'])
+        fig_bar.update_traces(textfont_size=12, textangle=0, textposition="outside", cliponaxis=False)
         st.plotly_chart(fig_bar, use_container_width=True)
-    else:
-        st.info("Sem dados suficientes para o gráfico de Categoria.")
-
-with g2:
-    st.subheader("Gradação: Supérfluo (1) a Essencial (5)")
-    if col_essencial and not df.empty:
-        legenda_map = {
-            1: "1 - Muito Supérfluo",
-            2: "2 - Supérfluo",
-            3: "3 - Neutro",
-            4: "4 - Essencial",
-            5: "5 - Muito Essencial"
-        }
         
-        df_ess = df.copy()
-        df_ess["Nota_Num"] = pd.to_numeric(df_ess[col_essencial], errors="coerce")
-        df_ess["Legenda_Formatada"] = df_ess["Nota_Num"].map(legenda_map).fillna("Não informado")
-        
-        df_pie = df_ess.groupby(["Nota_Num", "Legenda_Formatada"])["Valor_Num"].sum().reset_index()
-        df_pie = df_pie.sort_values("Nota_Num")
-        
-        fig_pie = px.pie(
-            df_pie,
-            names="Legenda_Formatada",
-            values="Valor_Num",
-            hole=0.4,
-            category_orders={"Legenda_Formatada": list(legenda_map.values())},
-            color_discrete_sequence=px.colors.diverging.RdYlBu
-        )
-        
-        fig_pie.update_traces(
-            textinfo="percent",
-            hovertemplate="<b>%{label}</b><br>Total Gasto: R$ %{value:,.2f}<br>Proporção: %{percent}"
-        )
-        fig_pie.update_layout(
-            legend_title_text="Grau de Necessidade",
-            legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02)
-        )
-        
+    with col_chart2:
+        st.subheader("Gradação: Supérfluo (1) a Essencial (5)")
+        # Renomeando a coluna internamente apenas para o gráfico ficar bonito
+        df_filtrado_grad = df_filtrado.rename(columns={'Essencial x Supérfluo': 'Grau de Necessidade'})
+        fig_pie = px.pie(df_filtrado_grad, names='Grau de Necessidade', values='Valor Numérico', hole=0.4, template="plotly_dark", 
+                         color_discrete_sequence=['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6'])
         st.plotly_chart(fig_pie, use_container_width=True)
-    else:
-        st.info("Sem dados suficientes para o gráfico de Essencial x Supérfluo.")
 
-# ==========================================
-# 6. Tabela de Lançamentos
-# ==========================================
-st.subheader("📋 Lançamentos do Formulário")
+    st.markdown("---")
+    
+    # --- TABELA DE DADOS ---
+    st.subheader("📋 Lançamentos do Período")
+    # Exibir colunas formatadas (escondendo as colunas de tratamento técnico)
+    colunas_visiveis = [col for col in df_filtrado.columns if col not in ['Data_Formatada', 'Valor Numérico']]
+    st.dataframe(df_filtrado[colunas_visiveis], use_container_width=True, hide_index=True)
 
-df_table = df.copy()
-if "Valor_Num" in df_table.columns:
-    df_table["Valor (R$)"] = df_table["Valor_Num"].apply(format_brl)
-
-cols_final = [c for c in df_table.columns if c not in ["Valor_Num", "Data_Parsed"]]
-
-st.dataframe(
-    df_table[cols_final],
-    use_container_width=True,
-    hide_index=True
-)
+else:
+    st.info("Nenhum dado encontrado para o período selecionado ou a planilha está vazia.")
