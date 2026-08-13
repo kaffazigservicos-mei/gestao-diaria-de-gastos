@@ -1,8 +1,7 @@
 import streamlit as st
 import pandas as pd
-from streamlit_gsheets import GSheetsConnection
-from datetime import datetime
 import plotly.express as px
+import re
 
 # -----------------------------------------------------------------------------
 # 1. CONFIGURAÇÃO DA PÁGINA
@@ -15,81 +14,72 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# 2. CONEXÃO NATIVA VIA ST.CONNECTION (ISENTA DE ERROS DE CHAVE MANUAL)
+# 2. FUNÇÃO DE CONVERSÃO E LEITURA DIRETA DO GOOGLE SHEETS
 # -----------------------------------------------------------------------------
-conn = st.connection("gsheets", type=GSheetsConnection)
+def obter_url_csv(url_gsheet):
+    """Converte a URL padrão da planilha em link direto de exportação CSV."""
+    pattern = r"/d/([a-zA-Z0-9-_]+)"
+    match = re.search(pattern, url_gsheet)
+    if match:
+        sheet_id = match.group(1)
+        return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+    return url_gsheet
 
 @st.cache_data(ttl=10)
 def carregar_dados():
-    # Lê os dados da planilha usando o conector nativo do Streamlit
-    df = conn.read(ttl=10)
-    
-    if not df.empty:
-        # Remover linhas totalmente vazias
-        df = df.dropna(how='all')
-        
-        # Converter a coluna Data para o formato datetime
-        if 'Data' in df.columns:
-            df['Data_Formatada'] = pd.to_datetime(df['Data'], format='%d/%m/%Y', errors='coerce')
-        
-        # Tratar a coluna Valor para converter qualquer texto em número puro
-        if 'Valor' in df.columns:
-            if df['Valor'].dtype == object:
-                df['Valor Numérico'] = df['Valor'].astype(str).str.replace('R$', '', regex=False)
-                df['Valor Numérico'] = df['Valor Numérico'].str.replace('$', '', regex=False)
-                df['Valor Numérico'] = df['Valor Numérico'].str.replace('.', '', regex=False)
-                df['Valor Numérico'] = df['Valor Numérico'].str.replace(',', '.', regex=False)
-                df['Valor Numérico'] = pd.to_numeric(df['Valor Numérico'], errors='coerce')
-            else:
-                df['Valor Numérico'] = pd.to_numeric(df['Valor'], errors='coerce')
+    try:
+        raw_url = st.secrets.get("google_sheet_url", "")
+        if not raw_url:
+            st.error("A variável 'google_sheet_url' não foi configurada nos Secrets.")
+            return pd.DataFrame()
             
-    return df
+        csv_url = obter_url_csv(raw_url)
+        df = pd.read_csv(csv_url)
+        
+        if not df.empty:
+            # Limpar linhas totalmente vazias
+            df = df.dropna(how='all')
+            
+            # Tratar a coluna Data
+            if 'Data' in df.columns:
+                df['Data_Formatada'] = pd.to_datetime(df['Data'], format='%d/%m/%Y', errors='coerce')
+            
+            # Tratar a coluna Valor para converter texto em número
+            if 'Valor' in df.columns:
+                if df['Valor'].dtype == object:
+                    df['Valor Numérico'] = df['Valor'].astype(str).str.replace('R$', '', regex=False)
+                    df['Valor Numérico'] = df['Valor Numérico'].str.replace('$', '', regex=False)
+                    df['Valor Numérico'] = df['Valor Numérico'].str.replace('.', '', regex=False)
+                    df['Valor Numérico'] = df['Valor Numérico'].str.replace(',', '.', regex=False)
+                    df['Valor Numérico'] = pd.to_numeric(df['Valor Numérico'], errors='coerce')
+                else:
+                    df['Valor Numérico'] = pd.to_numeric(df['Valor'], errors='coerce')
+                    
+        return df
+    except Exception as e:
+        st.error(f"Erro ao carregar dados da planilha: {e}")
+        return pd.DataFrame()
 
 # -----------------------------------------------------------------------------
-# 3. INTERFACE LATERAL (FILTROS E NOVO LANÇAMENTO)
+# 3. BARRA LATERAL (OPÇÕES E FILTROS)
 # -----------------------------------------------------------------------------
 st.sidebar.image("https://img.icons8.com/color/96/000000/google-sheets.png", width=60)
 st.sidebar.title("Opções")
 
+if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
 df = carregar_dados()
 
-# --- FORMULÁRIO DE INSERÇÃO ---
-with st.sidebar.expander("➕ Inserir Novo Lançamento"):
-    with st.form("novo_lancamento_form", clear_on_submit=True):
-        f_data = st.date_input("Data do Pagamento")
-        f_categoria = st.selectbox(
-            "Categoria", 
-            ["Alimentação", "Beleza", "Casa", "Doação", "Lazer", "Outros", "Presentes", "Saúde", "Transporte"]
-        )
-        f_descricao = st.text_input("Descrição breve")
-        f_valor = st.number_input("Valor", min_value=0.01, format="%0.2f")
-        f_metodo = st.selectbox(
-            "Método de pagamento", 
-            ["Cartão crédito", "Cartão débito", "Pix", "Dinheiro"]
-        ) 
-        f_gradacao = st.slider("Gradação (1 - Supérfluo a 5 - Essencial)", 1, 5, 3)
-        
-        submit = st.form_submit_button("Salvar na Planilha")
-        
-        if submit:
-            novo_dado = pd.DataFrame([{
-                "Carimbo de data/hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-                "Data": f_data.strftime("%d/%m/%Y"),
-                "Categoria": f_categoria,
-                "Descrição breve": f_descricao,
-                "Valor": f_valor,
-                "Método de pagamento": f_metodo,
-                "Essencial x Supérfluo": f_gradacao
-            }])
-            
-            # Anexa o novo DataFrame diretamente na planilha usando o conector nativo
-            df_atual = conn.read()
-            df_atualizado = pd.concat([df_atual, novo_dado], ignore_index=True)
-            conn.update(data=df_atualizado)
-            
-            st.success("Lançamento inserido com sucesso!")
-            st.cache_data.clear()
-            st.rerun()
+# --- ATALHO PARA O FORMULÁRIO DE ENTRADA ---
+st.sidebar.divider()
+st.sidebar.subheader("➕ Novo Lançamento")
+form_url = st.secrets.get("google_form_url", "")
+if form_url:
+    st.sidebar.link_button("Abrir Formulário de Entrada", form_url, use_container_width=True)
+else:
+    st.sidebar.info("Inclua 'google_form_url' nos Secrets para ativar o botão de novo lançamento.")
 
 # --- FILTRO DE DATAS ---
 st.sidebar.divider()
@@ -98,14 +88,15 @@ if not df.empty and 'Data_Formatada' in df.columns and not df['Data_Formatada'].
     max_date = df['Data_Formatada'].max().date()
     
     st.sidebar.subheader("📅 Filtro de Datas")
-    data_inicio, data_fim = st.sidebar.date_input(
+    data_selecionada = st.sidebar.date_input(
         "Selecione o período",
         value=[min_date, max_date],
         min_value=min_date,
         max_value=max_date
     )
     
-    if isinstance(data_inicio, type(min_date)) and isinstance(data_fim, type(max_date)):
+    if isinstance(data_selecionada, (list, tuple)) and len(data_selecionada) == 2:
+        data_inicio, data_fim = data_selecionada
         mask = (df['Data_Formatada'].dt.date >= data_inicio) & (df['Data_Formatada'].dt.date <= data_fim)
         df_filtrado = df.loc[mask]
     else:
