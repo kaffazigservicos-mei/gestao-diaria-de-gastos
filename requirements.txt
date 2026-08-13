@@ -1,5 +1,4 @@
 streamlit
-st-files-connection
-gsheetsdb
 pandas
 plotly
+requests
