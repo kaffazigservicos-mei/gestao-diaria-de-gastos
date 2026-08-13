@@ -1,12 +1,8 @@
 import streamlit as st
 import pandas as pd
-import gspread
-from google.oauth2.service_account import Credentials
+from streamlit_gsheets import GSheetsConnection
 from datetime import datetime
 import plotly.express as px
-import json
-import tempfile
-import os
 
 # -----------------------------------------------------------------------------
 # 1. CONFIGURAÇÃO DA PÁGINA
@@ -19,67 +15,33 @@ st.set_page_config(
 )
 
 # -----------------------------------------------------------------------------
-# 2. CONEXÃO ULTRA-ROBUSTA COM GOOGLE SHEETS
+# 2. CONEXÃO NATIVA VIA ST.CONNECTION (ISENTA DE ERROS DE CHAVE MANUAL)
 # -----------------------------------------------------------------------------
-@st.cache_resource
-def get_google_sheet():
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    
-    # Extrai o dicionário das credenciais
-    info = dict(st.secrets["gcp_service_account"])
-    
-    # TRATAMENTO RIGOROSO DA CHAVE PRIVADA
-    if "private_key" in info:
-        pk = str(info["private_key"]).strip()
-        # Remove aspas duplas/simples externas acidentais
-        if (pk.startswith('"') and pk.endswith('"')) or (pk.startswith("'") and pk.endswith("'")):
-            pk = pk[1:-1]
-        # Converte caracteres de escape \\n para quebras reais de linha \n
-        pk = pk.replace("\\n", "\n")
-        info["private_key"] = pk
+conn = st.connection("gsheets", type=GSheetsConnection)
 
-    # TENTATIVA 1: Carregamento direto por Dicionário Tratado
-    try:
-        creds = Credentials.from_service_account_info(info, scopes=scopes)
-    except Exception:
-        # TENTATIVA 2 (FALLBACK DE ALTA CONFIABILIDADE): Arquivo JSON Temporário
-        # Garante que a estrutura física do JSON seja reconstruída e lida nativamente
-        with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json') as temp_json:
-            json.dump(info, temp_json)
-            temp_path = temp_json.name
-            
-        try:
-            creds = Credentials.from_service_account_file(temp_path, scopes=scopes)
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-    
-    client = gspread.authorize(creds)
-    sheet = client.open_by_url(st.secrets["google_sheet_url"]).sheet1
-    return sheet
-
-@st.cache_data(ttl=10)  # Recarrega o cache a cada 10 segundos
+@st.cache_data(ttl=10)
 def carregar_dados():
-    sheet = get_google_sheet()
-    dados = sheet.get_all_records()
-    df = pd.DataFrame(dados)
+    # Lê os dados da planilha usando o conector nativo do Streamlit
+    df = conn.read(ttl=10)
     
     if not df.empty:
-        # Converter a coluna Data para o formato datetime do Pandas para o filtro
-        df['Data_Formatada'] = pd.to_datetime(df['Data'], format='%d/%m/%Y', errors='coerce')
+        # Remover linhas totalmente vazias
+        df = df.dropna(how='all')
+        
+        # Converter a coluna Data para o formato datetime
+        if 'Data' in df.columns:
+            df['Data_Formatada'] = pd.to_datetime(df['Data'], format='%d/%m/%Y', errors='coerce')
         
         # Tratar a coluna Valor para converter qualquer texto em número puro
-        if df['Valor'].dtype == object:
-            df['Valor Numérico'] = df['Valor'].astype(str).str.replace('R$', '', regex=False)
-            df['Valor Numérico'] = df['Valor Numérico'].str.replace('$', '', regex=False)
-            df['Valor Numérico'] = df['Valor Numérico'].str.replace('.', '', regex=False)
-            df['Valor Numérico'] = df['Valor Numérico'].str.replace(',', '.', regex=False)
-            df['Valor Numérico'] = pd.to_numeric(df['Valor Numérico'], errors='coerce')
-        else:
-            df['Valor Numérico'] = pd.to_numeric(df['Valor'], errors='coerce')
+        if 'Valor' in df.columns:
+            if df['Valor'].dtype == object:
+                df['Valor Numérico'] = df['Valor'].astype(str).str.replace('R$', '', regex=False)
+                df['Valor Numérico'] = df['Valor Numérico'].str.replace('$', '', regex=False)
+                df['Valor Numérico'] = df['Valor Numérico'].str.replace('.', '', regex=False)
+                df['Valor Numérico'] = df['Valor Numérico'].str.replace(',', '.', regex=False)
+                df['Valor Numérico'] = pd.to_numeric(df['Valor Numérico'], errors='coerce')
+            else:
+                df['Valor Numérico'] = pd.to_numeric(df['Valor'], errors='coerce')
             
     return df
 
@@ -89,10 +51,9 @@ def carregar_dados():
 st.sidebar.image("https://img.icons8.com/color/96/000000/google-sheets.png", width=60)
 st.sidebar.title("Opções")
 
-sheet = get_google_sheet()
 df = carregar_dados()
 
-# --- FORMULÁRIO DE INSERÇÃO CORRIGIDO ---
+# --- FORMULÁRIO DE INSERÇÃO ---
 with st.sidebar.expander("➕ Inserir Novo Lançamento"):
     with st.form("novo_lancamento_form", clear_on_submit=True):
         f_data = st.date_input("Data do Pagamento")
@@ -101,36 +62,34 @@ with st.sidebar.expander("➕ Inserir Novo Lançamento"):
             ["Alimentação", "Beleza", "Casa", "Doação", "Lazer", "Outros", "Presentes", "Saúde", "Transporte"]
         )
         f_descricao = st.text_input("Descrição breve")
-        
-        # Recebe o valor como número float puro (sem "R$")
         f_valor = st.number_input("Valor", min_value=0.01, format="%0.2f")
-        
-        # Opções idênticas ao Google Forms para manter o padrão
         f_metodo = st.selectbox(
             "Método de pagamento", 
             ["Cartão crédito", "Cartão débito", "Pix", "Dinheiro"]
         ) 
         f_gradacao = st.slider("Gradação (1 - Supérfluo a 5 - Essencial)", 1, 5, 3)
         
-        submit = st.form_submit_button("Salvar no Sheets")
+        submit = st.form_submit_button("Salvar na Planilha")
         
         if submit:
-            # Prepara os dados para inserção na planilha
-            nova_linha = [
-                datetime.now().strftime("%d/%m/%Y %H:%M:%S"), # Carimbo de data/hora
-                f_data.strftime("%d/%m/%Y"),                  # Data real do pagamento
-                f_categoria,                                  # Categoria
-                f_descricao,                                  # Descrição breve
-                f_valor,                                      # Número float puro
-                f_metodo,                                     # Método de pagamento
-                f_gradacao                                    # Essencial x Supérfluo
-            ]
+            novo_dado = pd.DataFrame([{
+                "Carimbo de data/hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                "Data": f_data.strftime("%d/%m/%Y"),
+                "Categoria": f_categoria,
+                "Descrição breve": f_descricao,
+                "Valor": f_valor,
+                "Método de pagamento": f_metodo,
+                "Essencial x Supérfluo": f_gradacao
+            }])
             
-            # USER_ENTERED força o Google Sheets a aplicar a formatação automática de moeda
-            sheet.append_row(nova_linha, value_input_option="USER_ENTERED")
+            # Anexa o novo DataFrame diretamente na planilha usando o conector nativo
+            df_atual = conn.read()
+            df_atualizado = pd.concat([df_atual, novo_dado], ignore_index=True)
+            conn.update(data=df_atualizado)
+            
             st.success("Lançamento inserido com sucesso!")
-            st.cache_data.clear() # Força a atualização do cache
-            st.rerun()           # Recarrega a aplicação
+            st.cache_data.clear()
+            st.rerun()
 
 # --- FILTRO DE DATAS ---
 st.sidebar.divider()
@@ -146,7 +105,6 @@ if not df.empty and 'Data_Formatada' in df.columns and not df['Data_Formatada'].
         max_value=max_date
     )
     
-    # Aplica o filtro pela coluna de Data
     if isinstance(data_inicio, type(min_date)) and isinstance(data_fim, type(max_date)):
         mask = (df['Data_Formatada'].dt.date >= data_inicio) & (df['Data_Formatada'].dt.date <= data_fim)
         df_filtrado = df.loc[mask]
