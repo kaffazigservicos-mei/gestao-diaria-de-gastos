@@ -25,7 +25,7 @@ DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1NJ4sLPZ1VHxmpSOyqMw
 def salvar_via_gspread(dados_dict):
     try:
         if "gcp_service_account" not in st.secrets:
-            return False, "Credenciais de escrita não configuradas nos Secrets. Use o formulário do Google."
+            return False, "Para salvar direto pelo app, configure a chave de Service Account nos Secrets ou utilize o formulário do Google."
             
         info = dict(st.secrets["gcp_service_account"])
         if "private_key" in info:
@@ -188,7 +188,7 @@ else:
                     st.cache_data.clear()
                     st.rerun()
                 else:
-                    st.warning(msg)
+                    st.info(msg)
 
     # Link do Google Forms (opcional)
     form_url = st.secrets.get("google_form_url", "")
@@ -246,7 +246,7 @@ else:
                 y='Valor Numérico',
                 text='Valor Numérico',
                 template="plotly_dark",
-                color_discrete_sequence=['#22c55e']
+                color_discrete_sequence=['#3b82f6']  # AZUL
             )
             fig_bar.update_traces(texttemplate='R$ %{text:.2f}', textposition='outside')
             fig_bar.update_layout(yaxis_title="R$", xaxis_title="")
