@@ -92,7 +92,7 @@ def obter_aba_planilha():
     return client.open_by_url(url).sheet1
 
 # -----------------------------------------------------------------------------
-# 3. LEITURA E TRATAMENTO DOS DADOS (CORRIGIDO PARA O FORMATO DA PLANILHA)
+# 3. LEITURA E TRATAMENTO DE DADOS COM PARSING PRECISO
 # -----------------------------------------------------------------------------
 def obter_serie(df, col_name):
     if col_name not in df.columns:
@@ -120,7 +120,6 @@ def carregar_dados():
 
     df = df.dropna(how='all')
 
-    # Mapeamento rigoroso das colunas
     col_map = {}
     usados = set()
     for col in df.columns:
@@ -146,36 +145,40 @@ def carregar_dados():
 
     df = df.rename(columns=col_map)
 
-    # TRATAMENTO CORRIGIDO DA COLUNA DATA (Garantindo leitura DD/MM/YYYY)
+    # PARSE PRECIOSO DE DATA (DD/MM/YYYY)
     serie_data = obter_serie(df, 'Data')
     if serie_data is not None:
-        # Limpa strings e converte estritamente no padrão brasileiro com dayfirst=True
         datas_str = serie_data.astype(str).str.strip().str.split().str[0]
         df['Data_Formatada'] = pd.to_datetime(datas_str, format='%d/%m/%Y', errors='coerce')
         
-        # Fallback para linhas com formatos mistos
         mask_na = df['Data_Formatada'].isna()
         if mask_na.any():
             df.loc[mask_na, 'Data_Formatada'] = pd.to_datetime(datas_str[mask_na], dayfirst=True, errors='coerce')
 
-    # TRATAMENTO CORRIGIDO DA COLUNA VALOR (Lida com R$, $, vírgulas e pontos)
+    # PARSE ULTRA-RIGOROSO DE VALORES (LIDA COM CIFRÕES, VÍRGULAS E PONTOS)
     serie_valor = obter_serie(df, 'Valor')
     if serie_valor is not None:
-        def parse_valor(v):
-            if pd.isna(v): return 0.0
-            if isinstance(v, (int, float)): return float(v)
-            v_str = re.sub(r'[^\d,.-]', '', str(v).strip())
-            if not v_str: return 0.0
-            if ',' in v_str and '.' in v_str:
-                v_str = v_str.replace('.', '').replace(',', '.')
-            elif ',' in v_str:
-                v_str = v_str.replace(',', '.')
+        def parse_valor_exato(v):
+            if pd.isna(v) or v == '': 
+                return 0.0
+            if isinstance(v, (int, float)): 
+                return float(v)
+            
+            v_clean = re.sub(r'[^\d,.-]', '', str(v).strip())
+            if not v_clean: 
+                return 0.0
+            
+            if ',' in v_clean and '.' in v_clean:
+                v_clean = v_clean.replace('.', '').replace(',', '.')
+            elif ',' in v_clean:
+                v_clean = v_clean.replace(',', '.')
+                
             try:
-                return float(v_str)
+                return float(v_clean)
             except:
                 return 0.0
 
-        df['Valor Numérico'] = serie_valor.apply(parse_valor)
+        df['Valor Numérico'] = serie_valor.apply(parse_valor_exato)
     else:
         df['Valor Numérico'] = 0.0
 
@@ -254,7 +257,6 @@ else:
         st.sidebar.divider()
         st.sidebar.subheader("📅 Filtro por Período")
 
-        # Filtra estritamente ignorando linhas onde a data falhou
         df_valid_dates = df.dropna(subset=['Data_Formatada'])
 
         if not df_valid_dates.empty:
@@ -268,7 +270,6 @@ else:
                 max_value=max_date
             )
 
-            # Aplicação matemática precisa do filtro do intervalo
             if isinstance(date_range, (list, tuple)):
                 if len(date_range) == 2:
                     d_start, d_end = date_range
