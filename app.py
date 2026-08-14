@@ -92,16 +92,8 @@ def obter_aba_planilha():
     return client.open_by_url(url).sheet1
 
 # -----------------------------------------------------------------------------
-# 3. LEITURA E TRATAMENTO DE DADOS COM PARSING PRECISO
+# 3. LEITURA BRUTA (MATRIZ EXATA DA PLANILHA)
 # -----------------------------------------------------------------------------
-def obter_serie(df, col_name):
-    if col_name not in df.columns:
-        return None
-    res = df[col_name]
-    if isinstance(res, pd.DataFrame):
-        return res.iloc[:, 0]
-    return res
-
 @st.cache_data(ttl=5)
 def carregar_dados():
     try:
@@ -109,8 +101,15 @@ def carregar_dados():
         if not sheet:
             return pd.DataFrame()
             
-        records = sheet.get_all_records()
-        df = pd.DataFrame(records)
+        # Pega a matriz bruta da planilha (sem inferência automática do gspread)
+        raw_data = sheet.get_all_values()
+        if not raw_data or len(raw_data) < 2:
+            return pd.DataFrame()
+
+        headers = [str(h).strip() for h in raw_data[0]]
+        rows = raw_data[1:]
+
+        df = pd.DataFrame(rows, columns=headers)
     except Exception as e:
         st.error(f"Erro ao acessar a planilha via Service Account: {e}")
         return pd.DataFrame()
@@ -118,8 +117,7 @@ def carregar_dados():
     if df.empty:
         return pd.DataFrame()
 
-    df = df.dropna(how='all')
-
+    # Mapeamento rigoroso de colunas
     col_map = {}
     usados = set()
     for col in df.columns:
@@ -145,40 +143,38 @@ def carregar_dados():
 
     df = df.rename(columns=col_map)
 
-    # PARSE PRECIOSO DE DATA (DD/MM/YYYY)
-    serie_data = obter_serie(df, 'Data')
-    if serie_data is not None:
-        datas_str = serie_data.astype(str).str.strip().str.split().str[0]
+    # Conversão blindada de Data
+    if 'Data' in df.columns:
+        # Extrai apenas a string DD/MM/YYYY
+        datas_str = df['Data'].astype(str).str.strip().str.split().str[0]
         df['Data_Formatada'] = pd.to_datetime(datas_str, format='%d/%m/%Y', errors='coerce')
         
+        # Fallback para linhas com divergências
         mask_na = df['Data_Formatada'].isna()
         if mask_na.any():
             df.loc[mask_na, 'Data_Formatada'] = pd.to_datetime(datas_str[mask_na], dayfirst=True, errors='coerce')
 
-    # PARSE ULTRA-RIGOROSO DE VALORES (LIDA COM CIFRÕES, VÍRGULAS E PONTOS)
-    serie_valor = obter_serie(df, 'Valor')
-    if serie_valor is not None:
-        def parse_valor_exato(v):
-            if pd.isna(v) or v == '': 
+    # Conversão blindada de Valor Numérico
+    if 'Valor' in df.columns:
+        def parse_moeda_bruta(v):
+            if not v or pd.isna(v): 
                 return 0.0
-            if isinstance(v, (int, float)): 
-                return float(v)
-            
-            v_clean = re.sub(r'[^\d,.-]', '', str(v).strip())
-            if not v_clean: 
+            # Remove qualquer caractere que não seja dígito, vírgula, ponto ou sinal de menos
+            s = re.sub(r'[^\d,.-]', '', str(v).strip())
+            if not s: 
                 return 0.0
             
-            if ',' in v_clean and '.' in v_clean:
-                v_clean = v_clean.replace('.', '').replace(',', '.')
-            elif ',' in v_clean:
-                v_clean = v_clean.replace(',', '.')
-                
+            # Se tiver vírgula e ponto: assume padrão BR (1.234,56 -> 1234.56)
+            if ',' in s and '.' in s:
+                s = s.replace('.', '').replace(',', '.')
+            elif ',' in s:
+                s = s.replace(',', '.')
             try:
-                return float(v_clean)
+                return float(s)
             except:
                 return 0.0
 
-        df['Valor Numérico'] = serie_valor.apply(parse_valor_exato)
+        df['Valor Numérico'] = df['Valor'].apply(parse_moeda_bruta)
     else:
         df['Valor Numérico'] = 0.0
 
@@ -253,15 +249,15 @@ else:
     df = carregar_dados()
 
     if not df.empty:
-        # FILTRO POR PERÍODO DINÂMICO
+        # FILTRO DE PERÍODO ESTRITO
         st.sidebar.divider()
         st.sidebar.subheader("📅 Filtro por Período")
 
         df_valid_dates = df.dropna(subset=['Data_Formatada'])
 
         if not df_valid_dates.empty:
-            min_date = df_valid_dates['Data_Formatada'].min().date()
-            max_date = df_valid_dates['Data_Formatada'].max().date()
+            min_date = df_valid_dates['Data_Formatada'].dt.date.min()
+            max_date = df_valid_dates['Data_Formatada'].dt.date.max()
 
             date_range = st.sidebar.date_input(
                 "Selecione o intervalo de datas",
@@ -278,14 +274,15 @@ else:
                 else:
                     d_start, d_end = min_date, max_date
                 
+                # Compara estritamente datetime.date para incluir todo o dia d_start até o dia d_end
                 mask = (df_valid_dates['Data_Formatada'].dt.date >= d_start) & (df_valid_dates['Data_Formatada'].dt.date <= d_end)
-                df_filtrado = df_valid_dates.loc[mask]
+                df_filtrado = df_valid_dates.loc[mask].copy()
             else:
-                df_filtrado = df_valid_dates
+                df_filtrado = df_valid_dates.copy()
         else:
-            df_filtrado = df
+            df_filtrado = df.copy()
 
-        # MÉTRICAS DE TOPO
+        # MÉTRICAS DE TOPO CALCULADAS SOBRE O DF FILTRADO
         total_gasto = df_filtrado['Valor Numérico'].sum()
         qtd_pagamentos = len(df_filtrado[df_filtrado['Valor Numérico'] > 0])
         media_pagamento = total_gasto / qtd_pagamentos if qtd_pagamentos > 0 else 0.0
@@ -354,7 +351,7 @@ else:
 
         st.markdown("---")
 
-        # TABELA DE DADOS
+        # TABELA DE DADOS DO PERÍODO
         st.subheader("📋 Lançamentos do Período")
         cols_to_hide = ['Data_Formatada', 'Valor Numérico']
         cols_display = [c for c in df_filtrado.columns if c not in cols_to_hide]
