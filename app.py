@@ -56,18 +56,13 @@ def formatar_chave_pem(key_str):
     if not key_str or not isinstance(key_str, str):
         return key_str
 
-    # Remove escapes literais e caracteres de aspas soltas
     k = key_str.replace('\\n', '\n').replace('"', '').replace("'", "").strip()
-
-    # Extrai somente o corpo em Base64 removendo cabeçalhos existentes e espaços
     k_clean = k.replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "")
     body = "".join(k_clean.split())
 
-    # Formata o corpo Base64 em linhas de 64 caracteres (padrão RFC 7468 PEM)
     lines = [body[i:i+64] for i in range(0, len(body), 64)]
     pem_formatted = "\n".join(lines)
 
-    # Monta rigorosamente com o cabeçalho PEM
     return f"-----BEGIN PRIVATE KEY-----\n{pem_formatted}\n-----END PRIVATE KEY-----\n"
 
 @st.cache_resource
@@ -83,7 +78,6 @@ def get_gspread_client():
         
     info = dict(st.secrets["gcp_service_account"])
     
-    # Tratamento estrito na chave privada
     if "private_key" in info:
         info["private_key"] = formatar_chave_pem(info["private_key"])
         
@@ -252,7 +246,7 @@ else:
     df = carregar_dados()
 
     if not df.empty:
-        # FILTRO POR PERÍODO
+        # FILTRO POR PERÍODO (RANGE DE SELEÇÃO DE TEMPO)
         st.sidebar.divider()
         st.sidebar.subheader("📅 Filtro por Período")
 
@@ -262,7 +256,7 @@ else:
             max_date = df_valid_dates['Data_Formatada'].max().date()
 
             date_range = st.sidebar.date_input(
-                "Selecione o intervalo",
+                "Selecione o intervalo de datas",
                 value=(min_date, max_date),
                 min_value=min_date,
                 max_value=max_date
