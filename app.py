@@ -49,7 +49,7 @@ st.markdown("""
 DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1NJ4sLPZ1VHxmpSOyqMw7cXfIJBl9yaVVok1QQofHs1Q/edit?usp=sharing"
 
 # -----------------------------------------------------------------------------
-# 2. AUTENTICAÇÃO BLINDADA VIA SERVICE ACCOUNT
+# 2. AUTENTICAÇÃO VIA SERVICE ACCOUNT
 # -----------------------------------------------------------------------------
 def formatar_chave_pem(key_str):
     """Garante a estrutura exata exigida pela biblioteca cryptography."""
@@ -92,7 +92,7 @@ def obter_aba_planilha():
     return client.open_by_url(url).sheet1
 
 # -----------------------------------------------------------------------------
-# 3. LEITURA BRUTA (MATRIZ EXATA DA PLANILHA)
+# 3. LEITURA E CONVERSÃO PRECISA DOS DADOS
 # -----------------------------------------------------------------------------
 @st.cache_data(ttl=5)
 def carregar_dados():
@@ -101,7 +101,6 @@ def carregar_dados():
         if not sheet:
             return pd.DataFrame()
             
-        # Pega a matriz bruta da planilha (sem inferência automática do gspread)
         raw_data = sheet.get_all_values()
         if not raw_data or len(raw_data) < 2:
             return pd.DataFrame()
@@ -117,7 +116,7 @@ def carregar_dados():
     if df.empty:
         return pd.DataFrame()
 
-    # Mapeamento rigoroso de colunas
+    # Mapeamento rigoroso das colunas
     col_map = {}
     usados = set()
     for col in df.columns:
@@ -143,38 +142,52 @@ def carregar_dados():
 
     df = df.rename(columns=col_map)
 
-    # Conversão blindada de Data
+    # PARSE ULTRA-ROBUSTO DE DATA (Lida com DD/MM/YYYY, YYYY-MM-DD e campos com hora)
+    def parse_data_brura(val):
+        if not val or pd.isna(val):
+            return None
+        s = str(val).strip().split()[0] # Pega apenas a data, descarta hora
+        # Tenta formato DD/MM/YYYY
+        try:
+            return datetime.strptime(s, "%d/%m/%Y").date()
+        except ValueError:
+            pass
+        # Tenta formato YYYY-MM-DD
+        try:
+            return datetime.strptime(s, "%Y-%m-%d").date()
+        except ValueError:
+            pass
+        # Fallback genérico via pandas
+        dt = pd.to_datetime(s, dayfirst=True, errors='coerce')
+        if pd.notna(dt):
+            return dt.date()
+        return None
+
     if 'Data' in df.columns:
-        # Extrai apenas a string DD/MM/YYYY
-        datas_str = df['Data'].astype(str).str.strip().str.split().str[0]
-        df['Data_Formatada'] = pd.to_datetime(datas_str, format='%d/%m/%Y', errors='coerce')
-        
-        # Fallback para linhas com divergências
-        mask_na = df['Data_Formatada'].isna()
-        if mask_na.any():
-            df.loc[mask_na, 'Data_Formatada'] = pd.to_datetime(datas_str[mask_na], dayfirst=True, errors='coerce')
+        df['Data_Objeto'] = df['Data'].apply(parse_data_brura)
+    elif 'Carimbo de data/hora' in df.columns:
+        df['Data_Objeto'] = df['Carimbo de data/hora'].apply(parse_data_brura)
+    else:
+        df['Data_Objeto'] = None
 
-    # Conversão blindada de Valor Numérico
+    # PARSE ULTRA-PRECISO DE VALOR
+    def parse_moeda_exata(v):
+        if not v or pd.isna(v): 
+            return 0.0
+        s = re.sub(r'[^\d,.-]', '', str(v).strip())
+        if not s: 
+            return 0.0
+        if ',' in s and '.' in s:
+            s = s.replace('.', '').replace(',', '.')
+        elif ',' in s:
+            s = s.replace(',', '.')
+        try:
+            return float(s)
+        except:
+            return 0.0
+
     if 'Valor' in df.columns:
-        def parse_moeda_bruta(v):
-            if not v or pd.isna(v): 
-                return 0.0
-            # Remove qualquer caractere que não seja dígito, vírgula, ponto ou sinal de menos
-            s = re.sub(r'[^\d,.-]', '', str(v).strip())
-            if not s: 
-                return 0.0
-            
-            # Se tiver vírgula e ponto: assume padrão BR (1.234,56 -> 1234.56)
-            if ',' in s and '.' in s:
-                s = s.replace('.', '').replace(',', '.')
-            elif ',' in s:
-                s = s.replace(',', '.')
-            try:
-                return float(s)
-            except:
-                return 0.0
-
-        df['Valor Numérico'] = df['Valor'].apply(parse_moeda_bruta)
+        df['Valor Numérico'] = df['Valor'].apply(parse_moeda_exata)
     else:
         df['Valor Numérico'] = 0.0
 
@@ -249,15 +262,15 @@ else:
     df = carregar_dados()
 
     if not df.empty:
-        # FILTRO DE PERÍODO ESTRITO
+        # FILTRO DE PERÍODO BASEADO EM DATA_OBJETO
         st.sidebar.divider()
         st.sidebar.subheader("📅 Filtro por Período")
 
-        df_valid_dates = df.dropna(subset=['Data_Formatada'])
+        df_valid_dates = df.dropna(subset=['Data_Objeto'])
 
         if not df_valid_dates.empty:
-            min_date = df_valid_dates['Data_Formatada'].dt.date.min()
-            max_date = df_valid_dates['Data_Formatada'].dt.date.max()
+            min_date = df_valid_dates['Data_Objeto'].min()
+            max_date = df_valid_dates['Data_Objeto'].max()
 
             date_range = st.sidebar.date_input(
                 "Selecione o intervalo de datas",
@@ -274,15 +287,15 @@ else:
                 else:
                     d_start, d_end = min_date, max_date
                 
-                # Compara estritamente datetime.date para incluir todo o dia d_start até o dia d_end
-                mask = (df_valid_dates['Data_Formatada'].dt.date >= d_start) & (df_valid_dates['Data_Formatada'].dt.date <= d_end)
+                # Filtro direto comparando datetime.date puramente
+                mask = (df_valid_dates['Data_Objeto'] >= d_start) & (df_valid_dates['Data_Objeto'] <= d_end)
                 df_filtrado = df_valid_dates.loc[mask].copy()
             else:
                 df_filtrado = df_valid_dates.copy()
         else:
             df_filtrado = df.copy()
 
-        # MÉTRICAS DE TOPO CALCULADAS SOBRE O DF FILTRADO
+        # MÉTRICAS DE TOPO
         total_gasto = df_filtrado['Valor Numérico'].sum()
         qtd_pagamentos = len(df_filtrado[df_filtrado['Valor Numérico'] > 0])
         media_pagamento = total_gasto / qtd_pagamentos if qtd_pagamentos > 0 else 0.0
@@ -353,7 +366,7 @@ else:
 
         # TABELA DE DADOS DO PERÍODO
         st.subheader("📋 Lançamentos do Período")
-        cols_to_hide = ['Data_Formatada', 'Valor Numérico']
+        cols_to_hide = ['Data_Objeto', 'Valor Numérico']
         cols_display = [c for c in df_filtrado.columns if c not in cols_to_hide]
         st.dataframe(df_filtrado[cols_display], use_container_width=True, hide_index=True, height=350)
     else:
