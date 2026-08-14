@@ -4,7 +4,7 @@ import plotly.express as px
 import re
 from datetime import datetime
 
-# Importações de escrita com fallback seguro
+# Importações de escrita com tratamento de segurança
 try:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -24,7 +24,7 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    /* Métricas de topo ampliadas */
+    /* Métricas do topo ampliadas e destacadas */
     [data-testid="stMetricValue"] {
         font-size: 34px !important;
         font-weight: 800 !important;
@@ -49,25 +49,29 @@ st.markdown("""
 DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1NJ4sLPZ1VHxmpSOyqMw7cXfIJBl9yaVVok1QQofHs1Q/edit?usp=sharing"
 
 # -----------------------------------------------------------------------------
-# 2. CONEXÃO E AUTENTICAÇÃO SEGURA VIA SERVICE ACCOUNT
+# 2. AUTENTICAÇÃO E TRATAMENTO DA CHAVE PEM
 # -----------------------------------------------------------------------------
 def sanitize_pem_key(key_str):
+    """Reconstrói a chave RSA em formato PEM válido caso o cabeçalho seja perdido."""
     if not key_str or not isinstance(key_str, str):
         return key_str
-    
-    key_str = key_str.replace('\\n', '\n').strip('\'"')
-    
-    if '-----BEGIN PRIVATE KEY-----' in key_str and '\n' not in key_str:
-        body = key_str.replace('-----BEGIN PRIVATE KEY-----', '').replace('-----END PRIVATE KEY-----', '').replace(' ', '')
-        chunks = [body[i:i+64] for i in range(0, len(body), 64)]
-        key_str = "-----BEGIN PRIVATE KEY-----\n" + "\n".join(chunks) + "\n-----END PRIVATE KEY-----\n"
-        
-    if '-----BEGIN PRIVATE KEY-----' not in key_str:
-        key_str = "-----BEGIN PRIVATE KEY-----\n" + key_str
-    if '-----END PRIVATE KEY-----' not in key_str:
-        key_str = key_str.rstrip() + "\n-----END PRIVATE KEY-----\n"
-        
-    return key_str
+
+    # Limpeza de caracteres de escape e aspas extras
+    key_clean = key_str.replace('\\n', '\n').replace('"', '').replace("'", "").strip()
+
+    # Se já tiver os cabeçalhos corretos, retorna ajustada
+    if "-----BEGIN PRIVATE KEY-----" in key_clean and "-----END PRIVATE KEY-----" in key_clean:
+        return key_clean
+
+    # Se a string veio sem cabeçalho (Base64 puro), limpa espaços e reestrutura
+    body = key_clean.replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "")
+    body = "".join(body.split())
+
+    # Formata em blocos de 64 caracteres (padrão RFC 7468)
+    lines = [body[i:i+64] for i in range(0, len(body), 64)]
+    pem_body = "\n".join(lines)
+
+    return f"-----BEGIN PRIVATE KEY-----\n{pem_body}\n-----END PRIVATE KEY-----\n"
 
 @st.cache_resource
 def get_gspread_client():
@@ -95,7 +99,7 @@ def obter_aba_planilha():
     return client.open_by_url(url).sheet1
 
 # -----------------------------------------------------------------------------
-# 3. LEITURA E TRATAMENTO DOS DADOS DA PLANILHA
+# 3. LEITURA E TRATAMENTO DOS DADOS
 # -----------------------------------------------------------------------------
 def obter_serie(df, col_name):
     if col_name not in df.columns:
@@ -148,7 +152,7 @@ def carregar_dados():
 
     df = df.rename(columns=col_map)
 
-    # Tratamento de Data
+    # Tratamento da coluna Data
     serie_data = obter_serie(df, 'Data')
     if serie_data is not None:
         datas_str = serie_data.astype(str).str.strip()
@@ -157,7 +161,7 @@ def carregar_dados():
         if mask_na.any():
             df.loc[mask_na, 'Data_Formatada'] = pd.to_datetime(serie_data[mask_na], dayfirst=True, errors='coerce')
 
-    # Tratamento de Valor
+    # Tratamento da coluna Valor
     serie_valor = obter_serie(df, 'Valor')
     if serie_valor is not None:
         def parse_valor(v):
@@ -193,12 +197,12 @@ if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
     st.cache_data.clear()
     st.rerun()
 
-# 1. ATALHO PARA ABRIR A PLANILHA NO GOOGLE SHEETS
+# ATALHO PARA ABRIR A PLANILHA
 st.sidebar.divider()
 sheet_link = st.secrets.get("google_sheet_url", DEFAULT_SHEET_URL)
 st.sidebar.link_button("🟢 Abrir Planilha Google", sheet_link, use_container_width=True)
 
-# 2. FORMULÁRIO PARA INSERÇÃO DE DADOS NO APP
+# FORMULÁRIO PARA INSERÇÃO DE DADOS
 st.sidebar.divider()
 with st.sidebar.expander("➕ Inserir Novo Lançamento", expanded=True):
     with st.form("form_novo_gasto", clear_on_submit=True):
@@ -219,7 +223,7 @@ with st.sidebar.expander("➕ Inserir Novo Lançamento", expanded=True):
 
         if btn_salvar:
             if not HAS_GSPREAD:
-                st.error("A biblioteca gspread não está instalada no requirements.txt.")
+                st.error("Instale o gspread no requirements.txt.")
             else:
                 try:
                     sheet = obter_aba_planilha()
@@ -238,13 +242,13 @@ with st.sidebar.expander("➕ Inserir Novo Lançamento", expanded=True):
                         st.cache_data.clear()
                         st.rerun()
                     else:
-                        st.error("Erro ao conectar com a planilha para salvar.")
+                        st.error("Erro ao conectar à planilha.")
                 except Exception as e:
                     st.error(f"Erro ao salvar registro: {e}")
 
 # --- DASHBOARD DE DADOS ---
 if not HAS_GSPREAD:
-    st.warning("Aguardando a atualização do arquivo `requirements.txt` no GitHub para ativar o gspread.")
+    st.warning("Atualize o arquivo `requirements.txt` no GitHub para liberar o gspread.")
 else:
     df = carregar_dados()
 
@@ -286,7 +290,7 @@ else:
 
         st.markdown("---")
 
-        # GRÁFICOS (AZUL E FONTES GRANDES)
+        # GRÁFICOS (AZUL MARCANTE E FONTES GRANDES)
         col_g1, col_g2 = st.columns([1.5, 1])
 
         with col_g1:
@@ -301,7 +305,7 @@ else:
                     y='Valor Numérico',
                     text='Valor Numérico',
                     template="plotly_dark",
-                    color_discrete_sequence=['#3b82f6']
+                    color_discrete_sequence=['#3b82f6']  # AZUL DESTACADO
                 )
                 fig_bar.update_traces(
                     texttemplate='R$ %{text:,.2f}',
@@ -349,4 +353,4 @@ else:
         cols_display = [c for c in df_filtrado.columns if c not in cols_to_hide]
         st.dataframe(df_filtrado[cols_display], use_container_width=True, hide_index=True, height=350)
     else:
-        st.info("Planilha conectada. Preencha o formulário na barra lateral para registrar novos gastos.")
+        st.info("Planilha conectada com sucesso! Insira um novo lançamento na barra lateral.")
