@@ -92,7 +92,7 @@ def obter_aba_planilha():
     return client.open_by_url(url).sheet1
 
 # -----------------------------------------------------------------------------
-# 3. LEITURA E TRATAMENTO DOS DADOS
+# 3. LEITURA E TRATAMENTO DOS DADOS (CORRIGIDO PARA O FORMATO DA PLANILHA)
 # -----------------------------------------------------------------------------
 def obter_serie(df, col_name):
     if col_name not in df.columns:
@@ -120,6 +120,7 @@ def carregar_dados():
 
     df = df.dropna(how='all')
 
+    # Mapeamento rigoroso das colunas
     col_map = {}
     usados = set()
     for col in df.columns:
@@ -145,16 +146,19 @@ def carregar_dados():
 
     df = df.rename(columns=col_map)
 
-    # Tratamento da coluna Data
+    # TRATAMENTO CORRIGIDO DA COLUNA DATA (Garantindo leitura DD/MM/YYYY)
     serie_data = obter_serie(df, 'Data')
     if serie_data is not None:
-        datas_str = serie_data.astype(str).str.strip()
+        # Limpa strings e converte estritamente no padrão brasileiro com dayfirst=True
+        datas_str = serie_data.astype(str).str.strip().str.split().str[0]
         df['Data_Formatada'] = pd.to_datetime(datas_str, format='%d/%m/%Y', errors='coerce')
+        
+        # Fallback para linhas com formatos mistos
         mask_na = df['Data_Formatada'].isna()
         if mask_na.any():
-            df.loc[mask_na, 'Data_Formatada'] = pd.to_datetime(serie_data[mask_na], dayfirst=True, errors='coerce')
+            df.loc[mask_na, 'Data_Formatada'] = pd.to_datetime(datas_str[mask_na], dayfirst=True, errors='coerce')
 
-    # Tratamento da coluna Valor
+    # TRATAMENTO CORRIGIDO DA COLUNA VALOR (Lida com R$, $, vírgulas e pontos)
     serie_valor = obter_serie(df, 'Valor')
     if serie_valor is not None:
         def parse_valor(v):
@@ -246,12 +250,14 @@ else:
     df = carregar_dados()
 
     if not df.empty:
-        # FILTRO POR PERÍODO (RANGE DE SELEÇÃO DE TEMPO)
+        # FILTRO POR PERÍODO DINÂMICO
         st.sidebar.divider()
         st.sidebar.subheader("📅 Filtro por Período")
 
-        if 'Data_Formatada' in df.columns and df['Data_Formatada'].notna().any():
-            df_valid_dates = df.dropna(subset=['Data_Formatada'])
+        # Filtra estritamente ignorando linhas onde a data falhou
+        df_valid_dates = df.dropna(subset=['Data_Formatada'])
+
+        if not df_valid_dates.empty:
             min_date = df_valid_dates['Data_Formatada'].min().date()
             max_date = df_valid_dates['Data_Formatada'].max().date()
 
@@ -262,12 +268,19 @@ else:
                 max_value=max_date
             )
 
-            if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-                d_start, d_end = date_range
-                mask = (df['Data_Formatada'].dt.date >= d_start) & (df['Data_Formatada'].dt.date <= d_end)
-                df_filtrado = df.loc[mask]
+            # Aplicação matemática precisa do filtro do intervalo
+            if isinstance(date_range, (list, tuple)):
+                if len(date_range) == 2:
+                    d_start, d_end = date_range
+                elif len(date_range) == 1:
+                    d_start = d_end = date_range[0]
+                else:
+                    d_start, d_end = min_date, max_date
+                
+                mask = (df_valid_dates['Data_Formatada'].dt.date >= d_start) & (df_valid_dates['Data_Formatada'].dt.date <= d_end)
+                df_filtrado = df_valid_dates.loc[mask]
             else:
-                df_filtrado = df
+                df_filtrado = df_valid_dates
         else:
             df_filtrado = df
 
@@ -298,7 +311,7 @@ else:
                     y='Valor Numérico',
                     text='Valor Numérico',
                     template="plotly_dark",
-                    color_discrete_sequence=['#3b82f6']  # AZUL DESTACADO
+                    color_discrete_sequence=['#3b82f6']
                 )
                 fig_bar.update_traces(
                     texttemplate='R$ %{text:,.2f}',
