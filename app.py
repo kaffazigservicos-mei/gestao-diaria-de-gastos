@@ -2,9 +2,12 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import re
+from datetime import datetime
+import gspread
+from google.oauth2.service_account import Credentials
 
 # -----------------------------------------------------------------------------
-# 1. CONFIGURAÇÃO DA PÁGINA E ESTILOS CSS
+# 1. CONFIGURAÇÃO DA PÁGINA E ESTILOS VISUAIS
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Gestão de Pagamentos Diários - Kaffa Zig",
@@ -13,10 +16,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Estilização CSS para ampliar fontes de métricas e títulos
 st.markdown("""
 <style>
-    /* Métricas do topo ampliadas */
+    /* Métricas de topo ampliadas */
     [data-testid="stMetricValue"] {
         font-size: 34px !important;
         font-weight: 800 !important;
@@ -38,10 +40,58 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTHTcIZo4KnPLnZCWF20XbR4pRnRXYzKDEqYVQ82kYaR_dOl1MiESgbsdxHMX8ze7N13dSv6IQqAYu6/pub?gid=1963638500&single=true&output=csv"
+DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1NJ4sLPZ1VHxmpSOyqMw7cXfIJBl9yaVVok1QQofHs1Q/edit?usp=sharing"
 
+# -----------------------------------------------------------------------------
+# 2. CONEXÃO E AUTENTICAÇÃO SEGURA VIA SERVICE ACCOUNT
+# -----------------------------------------------------------------------------
+def sanitize_pem_key(key_str):
+    """Ajusta a chave privada PEM para evitar erros de parsing no Python."""
+    if not key_str or not isinstance(key_str, str):
+        return key_str
+    
+    key_str = key_str.replace('\\n', '\n').strip('\'"')
+    
+    if '-----BEGIN PRIVATE KEY-----' in key_str and '\n' not in key_str:
+        body = key_str.replace('-----BEGIN PRIVATE KEY-----', '').replace('-----END PRIVATE KEY-----', '').replace(' ', '')
+        chunks = [body[i:i+64] for i in range(0, len(body), 64)]
+        key_str = "-----BEGIN PRIVATE KEY-----\n" + "\n".join(chunks) + "\n-----END PRIVATE KEY-----\n"
+        
+    if '-----BEGIN PRIVATE KEY-----' not in key_str:
+        key_str = "-----BEGIN PRIVATE KEY-----\n" + key_str
+    if '-----END PRIVATE KEY-----' not in key_str:
+        key_str = key_str.rstrip() + "\n-----END PRIVATE KEY-----\n"
+        
+    return key_str
+
+@st.cache_resource
+def get_gspread_client():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    if "gcp_service_account" not in st.secrets:
+        st.error("Configuração 'gcp_service_account' não encontrada nos Secrets.")
+        return None
+        
+    info = dict(st.secrets["gcp_service_account"])
+    if "private_key" in info:
+        info["private_key"] = sanitize_pem_key(info["private_key"])
+        
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    return gspread.authorize(creds)
+
+def obter_aba_planilha():
+    client = get_gspread_client()
+    if not client:
+        return None
+    url = st.secrets.get("google_sheet_url", DEFAULT_SHEET_URL)
+    return client.open_by_url(url).sheet1
+
+# -----------------------------------------------------------------------------
+# 3. LEITURA E TRATAMENTO DOS DADOS DA PLANILHA
+# -----------------------------------------------------------------------------
 def obter_serie(df, col_name):
-    """Extrai com segurança uma coluna como Series, mesmo se houver duplicidade."""
     if col_name not in df.columns:
         return None
     res = df[col_name]
@@ -49,33 +99,24 @@ def obter_serie(df, col_name):
         return res.iloc[:, 0]
     return res
 
-# -----------------------------------------------------------------------------
-# 2. CARREGAMENTO E TRATAMENTO À PROVA DE ERROS
-# -----------------------------------------------------------------------------
 @st.cache_data(ttl=5)
 def carregar_dados():
-    sheet_url = st.secrets.get("google_sheet_url", DEFAULT_SHEET_URL)
-    
-    # Se for um link padrão de edição, converte para exportação CSV
-    if "/pub" not in sheet_url and "export?format=csv" not in sheet_url:
-        match = re.search(r"/d/([a-zA-Z0-9-_]+)", sheet_url)
-        if match:
-            sheet_id = match.group(1)
-            sheet_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
-
     try:
-        df = pd.read_csv(sheet_url)
+        sheet = obter_aba_planilha()
+        if not sheet:
+            return pd.DataFrame()
+            
+        records = sheet.get_all_records()
+        df = pd.DataFrame(records)
     except Exception as e:
-        st.error(f"Erro ao carregar dados da planilha: {e}")
+        st.error(f"Erro ao acessar a planilha via Service Account: {e}")
         return pd.DataFrame()
 
-    if df is None or df.empty:
+    if df.empty:
         return pd.DataFrame()
 
-    # Remover linhas totalmente vazias
     df = df.dropna(how='all')
 
-    # Mapeamento com trava contra duplicidade de colunas
     col_map = {}
     usados = set()
     for col in df.columns:
@@ -101,7 +142,7 @@ def carregar_dados():
 
     df = df.rename(columns=col_map)
 
-    # Tratamento da coluna Data
+    # Tratamento de Data
     serie_data = obter_serie(df, 'Data')
     if serie_data is not None:
         datas_str = serie_data.astype(str).str.strip()
@@ -110,17 +151,14 @@ def carregar_dados():
         if mask_na.any():
             df.loc[mask_na, 'Data_Formatada'] = pd.to_datetime(serie_data[mask_na], dayfirst=True, errors='coerce')
 
-    # Tratamento da coluna Valor
+    # Tratamento de Valor
     serie_valor = obter_serie(df, 'Valor')
     if serie_valor is not None:
         def parse_valor(v):
-            if pd.isna(v):
-                return 0.0
-            if isinstance(v, (int, float)):
-                return float(v)
+            if pd.isna(v): return 0.0
+            if isinstance(v, (int, float)): return float(v)
             v_str = re.sub(r'[^\d,.-]', '', str(v).strip())
-            if not v_str:
-                return 0.0
+            if not v_str: return 0.0
             if ',' in v_str and '.' in v_str:
                 v_str = v_str.replace('.', '').replace(',', '.')
             elif ',' in v_str:
@@ -137,30 +175,69 @@ def carregar_dados():
     return df
 
 # -----------------------------------------------------------------------------
-# 3. INTERFACE PRINCIPAL E DASHBOARD
+# 4. PAINEL PRINCIPAL E INTERFACE DA BARRA LATERAL
 # -----------------------------------------------------------------------------
 st.title("📊 Gestão de Pagamentos Diários")
 
+# --- BARRA LATERAL ---
+st.sidebar.image("https://img.icons8.com/color/96/000000/google-sheets.png", width=55)
+st.sidebar.title("Kaffa Zig Gestão")
+
+if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
+# 1. ATALHO PARA ABRIR A PLANILHA NO GOOGLE SHEETS
+st.sidebar.divider()
+sheet_link = st.secrets.get("google_sheet_url", DEFAULT_SHEET_URL)
+st.sidebar.link_button("🟢 Abrir Planilha Google", sheet_link, use_container_width=True)
+
+# 2. FORMULÁRIO PARA INSERÇÃO DE DADOS NO APP
+st.sidebar.divider()
+with st.sidebar.expander("➕ Inserir Novo Lançamento", expanded=True):
+    with st.form("form_novo_gasto", clear_on_submit=True):
+        f_data = st.date_input("Data do Gasto")
+        f_categoria = st.selectbox(
+            "Categoria",
+            ["Alimentação", "Beleza", "Casa", "Doação", "Lazer", "Outros", "Presentes", "Saúde", "Transporte"]
+        )
+        f_descricao = st.text_input("Descrição breve")
+        f_valor = st.number_input("Valor (R$)", min_value=0.01, format="%.2f")
+        f_metodo = st.selectbox(
+            "Método de Pagamento",
+            ["Cartão crédito", "Cartão débito", "Pix", "Dinheiro"]
+        )
+        f_gradacao = st.slider("Gradação (1-Supérfluo a 5-Essencial)", 1, 5, 3)
+
+        btn_salvar = st.form_submit_button("Salvar Registro", use_container_width=True)
+
+        if btn_salvar:
+            try:
+                sheet = obter_aba_planilha()
+                if sheet:
+                    nova_linha = [
+                        datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                        f_data.strftime("%d/%m/%Y"),
+                        f_categoria,
+                        f_descricao,
+                        f_valor,
+                        f_metodo,
+                        f_gradacao
+                    ]
+                    sheet.append_row(nova_linha, value_input_option="USER_ENTERED")
+                    st.success("Lançamento salvo com sucesso!")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error("Erro ao conectar com a planilha para salvar.")
+            except Exception as e:
+                st.error(f"Erro ao salvar registro: {e}")
+
+# --- DASHBOARD DE DADOS ---
 df = carregar_dados()
 
-if df.empty:
-    st.warning("Não foi possível carregar os dados da planilha.")
-else:
-    # --- BARRA LATERAL ---
-    st.sidebar.image("https://img.icons8.com/color/96/000000/google-sheets.png", width=55)
-    st.sidebar.title("Kaffa Zig Gestão")
-
-    if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
-
-    # Link do Google Forms (opcional)
-    st.sidebar.divider()
-    form_url = st.secrets.get("google_form_url", "")
-    if form_url:
-        st.sidebar.link_button("📋 Abrir Google Forms", form_url, use_container_width=True)
-
-    # --- FILTRO POR PERÍODO DE DATAS ---
+if not df.empty:
+    # FILTRO POR PERÍODO
     st.sidebar.divider()
     st.sidebar.subheader("📅 Filtro por Período")
 
@@ -185,7 +262,7 @@ else:
     else:
         df_filtrado = df
 
-    # --- MÉTRICAS DE TOPO ---
+    # MÉTRICAS DE TOPO
     total_gasto = df_filtrado['Valor Numérico'].sum()
     qtd_pagamentos = len(df_filtrado[df_filtrado['Valor Numérico'] > 0])
     media_pagamento = total_gasto / qtd_pagamentos if qtd_pagamentos > 0 else 0.0
@@ -197,7 +274,7 @@ else:
 
     st.markdown("---")
 
-    # --- GRÁFICOS (AZUL MARCANTE E VALORES EM DESTAQUE) ---
+    # GRÁFICOS (AZUL E FONTES GRANDES)
     col_g1, col_g2 = st.columns([1.5, 1])
 
     with col_g1:
@@ -212,7 +289,7 @@ else:
                 y='Valor Numérico',
                 text='Valor Numérico',
                 template="plotly_dark",
-                color_discrete_sequence=['#3b82f6']  # AZUL DESTACADO
+                color_discrete_sequence=['#3b82f6']
             )
             fig_bar.update_traces(
                 texttemplate='R$ %{text:,.2f}',
@@ -254,8 +331,10 @@ else:
 
     st.markdown("---")
 
-    # --- TABELA DE DADOS ---
+    # TABELA DE DADOS
     st.subheader("📋 Lançamentos do Período")
     cols_to_hide = ['Data_Formatada', 'Valor Numérico']
     cols_display = [c for c in df_filtrado.columns if c not in cols_to_hide]
     st.dataframe(df_filtrado[cols_display], use_container_width=True, hide_index=True, height=350)
+else:
+    st.info("Planilha conectada. Preencha o formulário na barra lateral para registrar novos gastos.")
