@@ -3,8 +3,14 @@ import pandas as pd
 import plotly.express as px
 import re
 from datetime import datetime
-import gspread
-from google.oauth2.service_account import Credentials
+
+# Importações de escrita com fallback seguro
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    HAS_GSPREAD = True
+except ImportError:
+    HAS_GSPREAD = False
 
 # -----------------------------------------------------------------------------
 # 1. CONFIGURAÇÃO DA PÁGINA E ESTILOS VISUAIS
@@ -46,7 +52,6 @@ DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1NJ4sLPZ1VHxmpSOyqMw
 # 2. CONEXÃO E AUTENTICAÇÃO SEGURA VIA SERVICE ACCOUNT
 # -----------------------------------------------------------------------------
 def sanitize_pem_key(key_str):
-    """Ajusta a chave privada PEM para evitar erros de parsing no Python."""
     if not key_str or not isinstance(key_str, str):
         return key_str
     
@@ -66,12 +71,13 @@ def sanitize_pem_key(key_str):
 
 @st.cache_resource
 def get_gspread_client():
+    if not HAS_GSPREAD:
+        return None
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
     if "gcp_service_account" not in st.secrets:
-        st.error("Configuração 'gcp_service_account' não encontrada nos Secrets.")
         return None
         
     info = dict(st.secrets["gcp_service_account"])
@@ -212,129 +218,135 @@ with st.sidebar.expander("➕ Inserir Novo Lançamento", expanded=True):
         btn_salvar = st.form_submit_button("Salvar Registro", use_container_width=True)
 
         if btn_salvar:
-            try:
-                sheet = obter_aba_planilha()
-                if sheet:
-                    nova_linha = [
-                        datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-                        f_data.strftime("%d/%m/%Y"),
-                        f_categoria,
-                        f_descricao,
-                        f_valor,
-                        f_metodo,
-                        f_gradacao
-                    ]
-                    sheet.append_row(nova_linha, value_input_option="USER_ENTERED")
-                    st.success("Lançamento salvo com sucesso!")
-                    st.cache_data.clear()
-                    st.rerun()
-                else:
-                    st.error("Erro ao conectar com a planilha para salvar.")
-            except Exception as e:
-                st.error(f"Erro ao salvar registro: {e}")
+            if not HAS_GSPREAD:
+                st.error("A biblioteca gspread não está instalada no requirements.txt.")
+            else:
+                try:
+                    sheet = obter_aba_planilha()
+                    if sheet:
+                        nova_linha = [
+                            datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                            f_data.strftime("%d/%m/%Y"),
+                            f_categoria,
+                            f_descricao,
+                            f_valor,
+                            f_metodo,
+                            f_gradacao
+                        ]
+                        sheet.append_row(nova_linha, value_input_option="USER_ENTERED")
+                        st.success("Lançamento salvo com sucesso!")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("Erro ao conectar com a planilha para salvar.")
+                except Exception as e:
+                    st.error(f"Erro ao salvar registro: {e}")
 
 # --- DASHBOARD DE DADOS ---
-df = carregar_dados()
+if not HAS_GSPREAD:
+    st.warning("Aguardando a atualização do arquivo `requirements.txt` no GitHub para ativar o gspread.")
+else:
+    df = carregar_dados()
 
-if not df.empty:
-    # FILTRO POR PERÍODO
-    st.sidebar.divider()
-    st.sidebar.subheader("📅 Filtro por Período")
+    if not df.empty:
+        # FILTRO POR PERÍODO
+        st.sidebar.divider()
+        st.sidebar.subheader("📅 Filtro por Período")
 
-    if 'Data_Formatada' in df.columns and df['Data_Formatada'].notna().any():
-        df_valid_dates = df.dropna(subset=['Data_Formatada'])
-        min_date = df_valid_dates['Data_Formatada'].min().date()
-        max_date = df_valid_dates['Data_Formatada'].max().date()
+        if 'Data_Formatada' in df.columns and df['Data_Formatada'].notna().any():
+            df_valid_dates = df.dropna(subset=['Data_Formatada'])
+            min_date = df_valid_dates['Data_Formatada'].min().date()
+            max_date = df_valid_dates['Data_Formatada'].max().date()
 
-        date_range = st.sidebar.date_input(
-            "Selecione o intervalo",
-            value=(min_date, max_date),
-            min_value=min_date,
-            max_value=max_date
-        )
+            date_range = st.sidebar.date_input(
+                "Selecione o intervalo",
+                value=(min_date, max_date),
+                min_value=min_date,
+                max_value=max_date
+            )
 
-        if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
-            d_start, d_end = date_range
-            mask = (df['Data_Formatada'].dt.date >= d_start) & (df['Data_Formatada'].dt.date <= d_end)
-            df_filtrado = df.loc[mask]
+            if isinstance(date_range, (list, tuple)) and len(date_range) == 2:
+                d_start, d_end = date_range
+                mask = (df['Data_Formatada'].dt.date >= d_start) & (df['Data_Formatada'].dt.date <= d_end)
+                df_filtrado = df.loc[mask]
+            else:
+                df_filtrado = df
         else:
             df_filtrado = df
+
+        # MÉTRICAS DE TOPO
+        total_gasto = df_filtrado['Valor Numérico'].sum()
+        qtd_pagamentos = len(df_filtrado[df_filtrado['Valor Numérico'] > 0])
+        media_pagamento = total_gasto / qtd_pagamentos if qtd_pagamentos > 0 else 0.0
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Gasto", f"R$ {total_gasto:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        c2.metric("Total de Pagamentos", qtd_pagamentos)
+        c3.metric("Média por Pagamento", f"R$ {media_pagamento:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+
+        st.markdown("---")
+
+        # GRÁFICOS (AZUL E FONTES GRANDES)
+        col_g1, col_g2 = st.columns([1.5, 1])
+
+        with col_g1:
+            st.subheader("Gastos por Categoria")
+            if 'Categoria' in df_filtrado.columns and not df_filtrado.empty:
+                df_cat = df_filtrado.groupby('Categoria', as_index=False)['Valor Numérico'].sum()
+                df_cat = df_cat.sort_values(by='Valor Numérico', ascending=False)
+                
+                fig_bar = px.bar(
+                    df_cat,
+                    x='Categoria',
+                    y='Valor Numérico',
+                    text='Valor Numérico',
+                    template="plotly_dark",
+                    color_discrete_sequence=['#3b82f6']
+                )
+                fig_bar.update_traces(
+                    texttemplate='R$ %{text:,.2f}',
+                    textposition='outside',
+                    textfont=dict(size=16, color='#ffffff', family='Arial Black')
+                )
+                fig_bar.update_layout(
+                    font=dict(size=14),
+                    xaxis=dict(title="", tickfont=dict(size=14, color='#f8fafc')),
+                    yaxis=dict(title="R$", title_font=dict(size=16), tickfont=dict(size=14)),
+                    height=430
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
+
+        with col_g2:
+            st.subheader("Gradação (1-Supérfluo a 5-Essencial)")
+            if 'Essencial x Supérfluo' in df_filtrado.columns and not df_filtrado.empty:
+                df_grad = df_filtrado.groupby('Essencial x Supérfluo', as_index=False)['Valor Numérico'].sum()
+                df_grad['Essencial x Supérfluo'] = df_grad['Essencial x Supérfluo'].astype(str)
+                
+                fig_pie = px.pie(
+                    df_grad,
+                    names='Essencial x Supérfluo',
+                    values='Valor Numérico',
+                    hole=0.4,
+                    template="plotly_dark",
+                    color_discrete_sequence=['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6']
+                )
+                fig_pie.update_traces(
+                    textinfo='percent+label',
+                    textfont=dict(size=15, color='#ffffff')
+                )
+                fig_pie.update_layout(
+                    font=dict(size=14),
+                    legend=dict(font=dict(size=14)),
+                    height=430
+                )
+                st.plotly_chart(fig_pie, use_container_width=True)
+
+        st.markdown("---")
+
+        # TABELA DE DADOS
+        st.subheader("📋 Lançamentos do Período")
+        cols_to_hide = ['Data_Formatada', 'Valor Numérico']
+        cols_display = [c for c in df_filtrado.columns if c not in cols_to_hide]
+        st.dataframe(df_filtrado[cols_display], use_container_width=True, hide_index=True, height=350)
     else:
-        df_filtrado = df
-
-    # MÉTRICAS DE TOPO
-    total_gasto = df_filtrado['Valor Numérico'].sum()
-    qtd_pagamentos = len(df_filtrado[df_filtrado['Valor Numérico'] > 0])
-    media_pagamento = total_gasto / qtd_pagamentos if qtd_pagamentos > 0 else 0.0
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Gasto", f"R$ {total_gasto:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-    c2.metric("Total de Pagamentos", qtd_pagamentos)
-    c3.metric("Média por Pagamento", f"R$ {media_pagamento:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-
-    st.markdown("---")
-
-    # GRÁFICOS (AZUL E FONTES GRANDES)
-    col_g1, col_g2 = st.columns([1.5, 1])
-
-    with col_g1:
-        st.subheader("Gastos por Categoria")
-        if 'Categoria' in df_filtrado.columns and not df_filtrado.empty:
-            df_cat = df_filtrado.groupby('Categoria', as_index=False)['Valor Numérico'].sum()
-            df_cat = df_cat.sort_values(by='Valor Numérico', ascending=False)
-            
-            fig_bar = px.bar(
-                df_cat,
-                x='Categoria',
-                y='Valor Numérico',
-                text='Valor Numérico',
-                template="plotly_dark",
-                color_discrete_sequence=['#3b82f6']
-            )
-            fig_bar.update_traces(
-                texttemplate='R$ %{text:,.2f}',
-                textposition='outside',
-                textfont=dict(size=16, color='#ffffff', family='Arial Black')
-            )
-            fig_bar.update_layout(
-                font=dict(size=14),
-                xaxis=dict(title="", tickfont=dict(size=14, color='#f8fafc')),
-                yaxis=dict(title="R$", title_font=dict(size=16), tickfont=dict(size=14)),
-                height=430
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
-
-    with col_g2:
-        st.subheader("Gradação (1-Supérfluo a 5-Essencial)")
-        if 'Essencial x Supérfluo' in df_filtrado.columns and not df_filtrado.empty:
-            df_grad = df_filtrado.groupby('Essencial x Supérfluo', as_index=False)['Valor Numérico'].sum()
-            df_grad['Essencial x Supérfluo'] = df_grad['Essencial x Supérfluo'].astype(str)
-            
-            fig_pie = px.pie(
-                df_grad,
-                names='Essencial x Supérfluo',
-                values='Valor Numérico',
-                hole=0.4,
-                template="plotly_dark",
-                color_discrete_sequence=['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6']
-            )
-            fig_pie.update_traces(
-                textinfo='percent+label',
-                textfont=dict(size=15, color='#ffffff')
-            )
-            fig_pie.update_layout(
-                font=dict(size=14),
-                legend=dict(font=dict(size=14)),
-                height=430
-            )
-            st.plotly_chart(fig_pie, use_container_width=True)
-
-    st.markdown("---")
-
-    # TABELA DE DADOS
-    st.subheader("📋 Lançamentos do Período")
-    cols_to_hide = ['Data_Formatada', 'Valor Numérico']
-    cols_display = [c for c in df_filtrado.columns if c not in cols_to_hide]
-    st.dataframe(df_filtrado[cols_display], use_container_width=True, hide_index=True, height=350)
-else:
-    st.info("Planilha conectada. Preencha o formulário na barra lateral para registrar novos gastos.")
+        st.info("Planilha conectada. Preencha o formulário na barra lateral para registrar novos gastos.")
