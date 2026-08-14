@@ -49,29 +49,26 @@ st.markdown("""
 DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1NJ4sLPZ1VHxmpSOyqMw7cXfIJBl9yaVVok1QQofHs1Q/edit?usp=sharing"
 
 # -----------------------------------------------------------------------------
-# 2. AUTENTICAÇÃO E TRATAMENTO DA CHAVE PEM
+# 2. AUTENTICAÇÃO BLINDADA VIA SERVICE ACCOUNT
 # -----------------------------------------------------------------------------
-def sanitize_pem_key(key_str):
-    """Reconstrói a chave RSA em formato PEM válido caso o cabeçalho seja perdido."""
+def formatar_chave_pem(key_str):
+    """Garante a estrutura exata exigida pela biblioteca cryptography."""
     if not key_str or not isinstance(key_str, str):
         return key_str
 
-    # Limpeza de caracteres de escape e aspas extras
-    key_clean = key_str.replace('\\n', '\n').replace('"', '').replace("'", "").strip()
+    # Remove escapes literais e caracteres de aspas soltas
+    k = key_str.replace('\\n', '\n').replace('"', '').replace("'", "").strip()
 
-    # Se já tiver os cabeçalhos corretos, retorna ajustada
-    if "-----BEGIN PRIVATE KEY-----" in key_clean and "-----END PRIVATE KEY-----" in key_clean:
-        return key_clean
+    # Extrai somente o corpo em Base64 removendo cabeçalhos existentes e espaços
+    k_clean = k.replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "")
+    body = "".join(k_clean.split())
 
-    # Se a string veio sem cabeçalho (Base64 puro), limpa espaços e reestrutura
-    body = key_clean.replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "")
-    body = "".join(body.split())
-
-    # Formata em blocos de 64 caracteres (padrão RFC 7468)
+    # Formata o corpo Base64 em linhas de 64 caracteres (padrão RFC 7468 PEM)
     lines = [body[i:i+64] for i in range(0, len(body), 64)]
-    pem_body = "\n".join(lines)
+    pem_formatted = "\n".join(lines)
 
-    return f"-----BEGIN PRIVATE KEY-----\n{pem_body}\n-----END PRIVATE KEY-----\n"
+    # Monta rigorosamente com o cabeçalho PEM
+    return f"-----BEGIN PRIVATE KEY-----\n{pem_formatted}\n-----END PRIVATE KEY-----\n"
 
 @st.cache_resource
 def get_gspread_client():
@@ -85,8 +82,10 @@ def get_gspread_client():
         return None
         
     info = dict(st.secrets["gcp_service_account"])
+    
+    # Tratamento estrito na chave privada
     if "private_key" in info:
-        info["private_key"] = sanitize_pem_key(info["private_key"])
+        info["private_key"] = formatar_chave_pem(info["private_key"])
         
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
