@@ -215,7 +215,7 @@ st.sidebar.link_button("🟢 Abrir Planilha Google", sheet_link, use_container_w
 st.sidebar.divider()
 with st.sidebar.expander("➕ Inserir Novo Lançamento", expanded=True):
     with st.form("form_novo_gasto", clear_on_submit=True):
-        f_data = st.date_input("Data do Gasto")
+        f_data = st.date_input("Data do Gasto", format="DD/MM/YYYY")
         f_categoria = st.selectbox(
             "Categoria",
             ["Alimentação", "Beleza", "Casa", "Doação", "Lazer", "Outros", "Presentes", "Saúde", "Transporte"]
@@ -276,7 +276,8 @@ else:
                 "Selecione o intervalo de datas",
                 value=(min_date, max_date),
                 min_value=min_date,
-                max_value=max_date
+                max_value=max_date,
+                format="DD/MM/YYYY"
             )
 
             if isinstance(date_range, (list, tuple)):
@@ -343,35 +344,25 @@ else:
                 df_grad = df_filtrado.groupby('Essencial x Supérfluo', as_index=False)['Valor Numérico'].sum()
                 df_grad['Essencial x Supérfluo'] = df_grad['Essencial x Supérfluo'].astype(str)
                 
-                # Mapeamento dos números para nomes descritivos
-                mapeamento_gradacao = {
-                    '1': '1 - Supérfluo',
-                    '2': '2 - Pouco Essencial',
-                    '3': '3 - Moderado',
-                    '4': '4 - Importante',
-                    '5': '5 - Essencial'
-                }
-                df_grad['Categoria Nome'] = df_grad['Essencial x Supérfluo'].map(mapeamento_gradacao).fillna(df_grad['Essencial x Supérfluo'])
+                # CORREÇÃO: Ordenar em ordem decrescente (5, 4, 3, 2, 1)
+                df_grad = df_grad.sort_values('Essencial x Supérfluo', ascending=False)
                 
                 fig_pie = px.pie(
                     df_grad,
-                    names='Categoria Nome',
+                    names='Essencial x Supérfluo',
                     values='Valor Numérico',
                     hole=0.4,
                     template="plotly_dark",
                     color_discrete_sequence=['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6']
                 )
-                # ALTERAÇÃO: Remover números das fatias, mostrar apenas na legenda
+                # CORREÇÃO: Remover números das fatias, mostrar apenas na legenda
                 fig_pie.update_traces(
                     textinfo='none',
                     textfont=dict(size=15, color='#ffffff')
                 )
                 fig_pie.update_layout(
                     font=dict(size=14),
-                    legend=dict(
-                        font=dict(size=14),
-                        title=dict(text="Categoria", font=dict(size=16))
-                    ),
+                    legend=dict(font=dict(size=14)),
                     height=430
                 )
                 st.plotly_chart(fig_pie, use_container_width=True)
