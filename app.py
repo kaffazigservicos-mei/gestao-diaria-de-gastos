@@ -1,373 +1,161 @@
+--- app.py (原始)
+
+
++++ app.py (修改后)
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import re
-from datetime import datetime
+import plotly.graph_objects as go
+from datetime import date
 
-# Importações de escrita com tratamento de segurança
-try:
-    import gspread
-    from google.oauth2.service_account import Credentials
-    HAS_GSPREAD = True
-except ImportError:
-    HAS_GSPREAD = False
+st.set_page_config(page_title="Gestão Diária de Gastos", page_icon="💰", layout="wide")
 
-# -----------------------------------------------------------------------------
-# 1. CONFIGURAÇÃO DA PÁGINA E ESTILOS VISUAIS
-# -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="Gestão de Pagamentos Diários - Kaffa Zig",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+st.title("💰 Gestão Diária de Gastos")
+st.markdown("Controle suas despesas por categoria")
 
-st.markdown("""
-<style>
-    /* Métricas do topo ampliadas e destacadas */
-    [data-testid="stMetricValue"] {
-        font-size: 34px !important;
-        font-weight: 800 !important;
-        color: #38bdf8 !important;
-    }
-    [data-testid="stMetricLabel"] {
-        font-size: 17px !important;
-        font-weight: 600 !important;
-        color: #94a3b8 !important;
-    }
-    .stMarkdown h3 {
-        font-size: 22px !important;
-        font-weight: 700 !important;
-    }
-    .stSidebar label {
-        font-size: 15px !important;
-        font-weight: 600 !important;
-    }
-</style>
-""", unsafe_allow_html=True)
+# --- Categorias e cores ---
+CATEGORIAS = [
+    "Alimentação", "Transporte", "Moradia", "Saúde",
+    "Educação", "Lazer", "Vestuário", "Outros"
+]
 
-DEFAULT_SHEET_URL = "https://docs.google.com/spreadsheets/d/1NJ4sLPZ1VHxmpSOyqMw7cXfIJBl9yaVVok1QQofHs1Q/edit?usp=sharing"
+CORES = [
+    "#ef4444", "#f97316", "#eab308", "#22c55e",
+    "#06b6d4", "#3b82f6", "#8b5cf6", "#ec4899"
+]
 
-# -----------------------------------------------------------------------------
-# 2. AUTENTICAÇÃO VIA SERVICE ACCOUNT
-# -----------------------------------------------------------------------------
-def formatar_chave_pem(key_str):
-    """Garante a estrutura exata exigida pela biblioteca cryptography."""
-    if not key_str or not isinstance(key_str, str):
-        return key_str
+cor_por_categoria = dict(zip(CATEGORIAS, CORES))
 
-    k = key_str.replace('\\n', '\n').replace('"', '').replace("'", "").strip()
-    k_clean = k.replace("-----BEGIN PRIVATE KEY-----", "").replace("-----END PRIVATE KEY-----", "")
-    body = "".join(k_clean.split())
+# --- Dados iniciais ---
+if "gastos" not in st.session_state:
+    st.session_state.gastos = pd.DataFrame([
+        {"Descrição": "Supermercado", "Valor": 350.00, "Categoria": "Alimentação", "Data": "2025-01-15"},
+        {"Descrição": "Combustível", "Valor": 200.00, "Categoria": "Transporte", "Data": "2025-01-15"},
+        {"Descrição": "Aluguel", "Valor": 1500.00, "Categoria": "Moradia", "Data": "2025-01-14"},
+        {"Descrição": "Farmácia", "Valor": 85.00, "Categoria": "Saúde", "Data": "2025-01-14"},
+        {"Descrição": "Curso online", "Valor": 120.00, "Categoria": "Educação", "Data": "2025-01-13"},
+        {"Descrição": "Cinema", "Valor": 60.00, "Categoria": "Lazer", "Data": "2025-01-13"},
+        {"Descrição": "Restaurante", "Valor": 95.00, "Categoria": "Alimentação", "Data": "2025-01-12"},
+        {"Descrição": "Ônibus", "Valor": 45.00, "Categoria": "Transporte", "Data": "2025-01-12"},
+        {"Descrição": "Roupas", "Valor": 250.00, "Categoria": "Vestuário", "Data": "2025-01-11"},
+        {"Descrição": "Conta de luz", "Valor": 180.00, "Categoria": "Moradia", "Data": "2025-01-10"},
+    ])
 
-    lines = [body[i:i+64] for i in range(0, len(body), 64)]
-    pem_formatted = "\n".join(lines)
+# --- Cards de resumo ---
+col1, col2, col3 = st.columns(3)
+total = st.session_state.gastos["Valor"].sum()
+col1.metric("Total de Gastos", f"R$ {total:,.2f}")
+col2.metric("Quantidade de Registros", len(st.session_state.gastos))
+col3.metric("Categorias Utilizadas", st.session_state.gastos["Categoria"].nunique())
 
-    return f"-----BEGIN PRIVATE KEY-----\n{pem_formatted}\n-----END PRIVATE KEY-----\n"
+st.markdown("---")
 
-@st.cache_resource
-def get_gspread_client():
-    if not HAS_GSPREAD:
-        return None
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    if "gcp_service_account" not in st.secrets:
-        return None
-        
-    info = dict(st.secrets["gcp_service_account"])
-    
-    if "private_key" in info:
-        info["private_key"] = formatar_chave_pem(info["private_key"])
-        
-    creds = Credentials.from_service_account_info(info, scopes=scopes)
-    return gspread.authorize(creds)
+# --- Formulário e Gráfico lado a lado ---
+col_form, col_grafico = st.columns(2)
 
-def obter_aba_planilha():
-    client = get_gspread_client()
-    if not client:
-        return None
-    url = st.secrets.get("google_sheet_url", DEFAULT_SHEET_URL)
-    return client.open_by_url(url).sheet1
+# --- Formulário ---
+with col_form:
+    st.subheader("➕ Adicionar Gasto")
+    with st.form("form_gasto", clear_on_submit=True):
+        descricao = st.text_input("Descrição", placeholder="Ex: Supermercado, Uber, etc.")
+        col_v, col_d = st.columns(2)
+        with col_v:
+            valor = st.number_input("Valor (R$)", min_value=0.0, step=0.01, format="%.2f")
+        with col_d:
+            data = st.date_input("Data", value=date.today())
+        categoria = st.selectbox("Categoria", CATEGORIAS)
+        submitted = st.form_submit_button("Adicionar Gasto", use_container_width=True)
 
-# -----------------------------------------------------------------------------
-# 3. LEITURA E CONVERSÃO PRECISA DOS DADOS
-# -----------------------------------------------------------------------------
-@st.cache_data(ttl=5)
-def carregar_dados():
-    try:
-        sheet = obter_aba_planilha()
-        if not sheet:
-            return pd.DataFrame()
-            
-        raw_data = sheet.get_all_values()
-        if not raw_data or len(raw_data) < 2:
-            return pd.DataFrame()
+        if submitted and descricao and valor > 0:
+            novo = pd.DataFrame([{
+                "Descrição": descricao,
+                "Valor": valor,
+                "Categoria": categoria,
+                "Data": data.strftime("%Y-%m-%d"),
+            }])
+            st.session_state.gastos = pd.concat([novo, st.session_state.gastos], ignore_index=True)
+            st.success("Gasto adicionado com sucesso!")
+            st.rerun()
 
-        headers = [str(h).strip() for h in raw_data[0]]
-        rows = raw_data[1:]
+# --- Gráfico de Pizza ---
+with col_grafico:
+    st.subheader("📊 Gastos por Categoria")
 
-        df = pd.DataFrame(rows, columns=headers)
-    except Exception as e:
-        st.error(f"Erro ao acessar a planilha via Service Account: {e}")
-        return pd.DataFrame()
+    dados_categoria = (
+        st.session_state.gastos
+        .groupby("Categoria")["Valor"]
+        .sum()
+        .reset_index()
+    )
 
-    if df.empty:
-        return pd.DataFrame()
+    if not dados_categoria.empty:
+        # Monta listas de cores na mesma ordem dos dados
+        cores_grafico = [cor_por_categoria.get(cat, "#999999") for cat in dados_categoria["Categoria"]]
 
-    # Mapeamento rigoroso das colunas
-    col_map = {}
-    usados = set()
-    for col in df.columns:
-        c_low = str(col).strip().lower()
-        if 'carimbo' in c_low and 'Carimbo' not in usados:
-            col_map[col] = 'Carimbo de data/hora'
-            usados.add('Carimbo')
-        elif 'data' in c_low and 'carimbo' not in c_low and 'Data' not in usados:
-            col_map[col] = 'Data'
-            usados.add('Data')
-        elif 'valor' in c_low and 'Valor' not in usados:
-            col_map[col] = 'Valor'
-            usados.add('Valor')
-        elif 'categoria' in c_low and 'Categoria' not in usados:
-            col_map[col] = 'Categoria'
-            usados.add('Categoria')
-        elif ('metodo' in c_low or 'método' in c_low or 'pagamento' in c_low) and 'Método de pagamento' not in usados:
-            col_map[col] = 'Método de pagamento'
-            usados.add('Método de pagamento')
-        elif ('essencial' in c_low or 'superfluo' in c_low or 'supérfluo' in c_low or 'grada' in c_low) and 'Essencial x Supérfluo' not in usados:
-            col_map[col] = 'Essencial x Supérfluo'
-            usados.add('Essencial x Supérfluo')
+        # Monta os textos da legenda: "Nome da Categoria"
+        labels_legenda = dados_categoria["Categoria"].tolist()
 
-    df = df.rename(columns=col_map)
+        fig = go.Figure(data=[go.Pie(
+            labels=labels_legenda,
+            values=dados_categoria["Valor"],
+            hole=0.4,
+            marker=dict(colors=cores_grafico),
+            # SEM números no gráfico — apenas a cor da fatia
+            textinfo="none",
+            # Legenda mostra o NOME da categoria (não números)
+            textposition="inside",
+            insidetextorientation="radial",
+        )])
 
-    # PARSE ULTRA-ROBUSTO DE DATA (Lida com DD/MM/YYYY, YYYY-MM-DD e campos com hora)
-    def parse_data_brura(val):
-        if not val or pd.isna(val):
-            return None
-        s = str(val).strip().split()[0] # Pega apenas a data, descarta hora
-        # Tenta formato DD/MM/YYYY
-        try:
-            return datetime.strptime(s, "%d/%m/%Y").date()
-        except ValueError:
-            pass
-        # Tenta formato YYYY-MM-DD
-        try:
-            return datetime.strptime(s, "%Y-%m-%d").date()
-        except ValueError:
-            pass
-        # Fallback genérico via pandas
-        dt = pd.to_datetime(s, dayfirst=True, errors='coerce')
-        if pd.notna(dt):
-            return dt.date()
-        return None
-
-    if 'Data' in df.columns:
-        df['Data_Objeto'] = df['Data'].apply(parse_data_brura)
-    elif 'Carimbo de data/hora' in df.columns:
-        df['Data_Objeto'] = df['Carimbo de data/hora'].apply(parse_data_brura)
-    else:
-        df['Data_Objeto'] = None
-
-    # PARSE ULTRA-PRECISO DE VALOR
-    def parse_moeda_exata(v):
-        if not v or pd.isna(v): 
-            return 0.0
-        s = re.sub(r'[^\d,.-]', '', str(v).strip())
-        if not s: 
-            return 0.0
-        if ',' in s and '.' in s:
-            s = s.replace('.', '').replace(',', '.')
-        elif ',' in s:
-            s = s.replace(',', '.')
-        try:
-            return float(s)
-        except:
-            return 0.0
-
-    if 'Valor' in df.columns:
-        df['Valor Numérico'] = df['Valor'].apply(parse_moeda_exata)
-    else:
-        df['Valor Numérico'] = 0.0
-
-    return df
-
-# -----------------------------------------------------------------------------
-# 4. PAINEL PRINCIPAL E INTERFACE DA BARRA LATERAL
-# -----------------------------------------------------------------------------
-st.title("📊 Gestão de Pagamentos Diários")
-
-# --- BARRA LATERAL ---
-st.sidebar.image("https://img.icons8.com/color/96/000000/google-sheets.png", width=55)
-st.sidebar.title("Kaffa Zig Gestão")
-
-if st.sidebar.button("🔄 Atualizar Dados", use_container_width=True):
-    st.cache_data.clear()
-    st.rerun()
-
-# ATALHO PARA ABRIR A PLANILHA
-st.sidebar.divider()
-sheet_link = st.secrets.get("google_sheet_url", DEFAULT_SHEET_URL)
-st.sidebar.link_button("🟢 Abrir Planilha Google", sheet_link, use_container_width=True)
-
-# FORMULÁRIO PARA INSERÇÃO DE DADOS
-st.sidebar.divider()
-with st.sidebar.expander("➕ Inserir Novo Lançamento", expanded=True):
-    with st.form("form_novo_gasto", clear_on_submit=True):
-        f_data = st.date_input("Data do Gasto")
-        f_categoria = st.selectbox(
-            "Categoria",
-            ["Alimentação", "Beleza", "Casa", "Doação", "Lazer", "Outros", "Presentes", "Saúde", "Transporte"]
+        fig.update_layout(
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=-0.2,
+                xanchor="center",
+                x=0.5,
+                font=dict(size=13),
+            ),
+            margin=dict(t=20, b=80, l=20, r=20),
+            height=400,
         )
-        f_descricao = st.text_input("Descrição breve")
-        f_valor = st.number_input("Valor (R$)", min_value=0.01, format="%.2f")
-        f_metodo = st.selectbox(
-            "Método de Pagamento",
-            ["Cartão crédito", "Cartão débito", "Pix", "Dinheiro"]
-        )
-        f_gradacao = st.slider("Gradação (1-Supérfluo a 5-Essencial)", 1, 5, 3)
 
-        btn_salvar = st.form_submit_button("Salvar Registro", use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
 
-        if btn_salvar:
-            if not HAS_GSPREAD:
-                st.error("Instale o gspread no requirements.txt.")
-            else:
-                try:
-                    sheet = obter_aba_planilha()
-                    if sheet:
-                        nova_linha = [
-                            datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-                            f_data.strftime("%d/%m/%Y"),
-                            f_categoria,
-                            f_descricao,
-                            f_valor,
-                            f_metodo,
-                            f_gradacao
-                        ]
-                        sheet.append_row(nova_linha, value_input_option="USER_ENTERED")
-                        st.success("Lançamento salvo com sucesso!")
-                        st.cache_data.clear()
-                        st.rerun()
-                    else:
-                        st.error("Erro ao conectar à planilha.")
-                except Exception as e:
-                    st.error(f"Erro ao salvar registro: {e}")
+        # Tabela resumo por categoria
+        dados_categoria["Percentual"] = (dados_categoria["Valor"] / total * 100).round(1)
+        dados_categoria = dados_categoria.sort_values("Valor", ascending=False)
 
-# --- DASHBOARD DE DADOS ---
-if not HAS_GSPREAD:
-    st.warning("Atualize o arquivo `requirements.txt` no GitHub para liberar o gspread.")
-else:
-    df = carregar_dados()
-
-    if not df.empty:
-        # FILTRO DE PERÍODO BASEADO EM DATA_OBJETO
-        st.sidebar.divider()
-        st.sidebar.subheader("📅 Filtro por Período")
-
-        df_valid_dates = df.dropna(subset=['Data_Objeto'])
-
-        if not df_valid_dates.empty:
-            min_date = df_valid_dates['Data_Objeto'].min()
-            max_date = df_valid_dates['Data_Objeto'].max()
-
-            date_range = st.sidebar.date_input(
-                "Selecione o intervalo de datas",
-                value=(min_date, max_date),
-                min_value=min_date,
-                max_value=max_date
+        st.markdown("##### Resumo por Categoria")
+        for _, row in dados_categoria.iterrows():
+            cor = cor_por_categoria.get(row["Categoria"], "#999")
+            st.markdown(
+                f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">'
+                f'<span style="width:12px;height:12px;border-radius:50%;background:{cor};display:inline-block;"></span>'
+                f'<b>{row["Categoria"]}</b> — '
+                f'R$ {row["Valor"]:,.2f} ({row["Percentual"]}%)'
+                f'</div>',
+                unsafe_allow_html=True,
             )
 
-            if isinstance(date_range, (list, tuple)):
-                if len(date_range) == 2:
-                    d_start, d_end = date_range
-                elif len(date_range) == 1:
-                    d_start = d_end = date_range[0]
-                else:
-                    d_start, d_end = min_date, max_date
-                
-                # Filtro direto comparando datetime.date puramente
-                mask = (df_valid_dates['Data_Objeto'] >= d_start) & (df_valid_dates['Data_Objeto'] <= d_end)
-                df_filtrado = df_valid_dates.loc[mask].copy()
-            else:
-                df_filtrado = df_valid_dates.copy()
-        else:
-            df_filtrado = df.copy()
+st.markdown("---")
 
-        # MÉTRICAS DE TOPO
-        total_gasto = df_filtrado['Valor Numérico'].sum()
-        qtd_pagamentos = len(df_filtrado[df_filtrado['Valor Numérico'] > 0])
-        media_pagamento = total_gasto / qtd_pagamentos if qtd_pagamentos > 0 else 0.0
+# --- Lista de Gastos ---
+st.subheader("📋 Lista de Gastos")
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total Gasto", f"R$ {total_gasto:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
-        c2.metric("Total de Pagamentos", qtd_pagamentos)
-        c3.metric("Média por Pagamento", f"R$ {media_pagamento:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+df_exibicao = st.session_state.gastos.copy()
+df_exibicao["Data"] = pd.to_datetime(df_exibicao["Data"]).dt.strftime("%d/%m/%Y")
+df_exibicao["Valor"] = df_exibicao["Valor"].apply(lambda x: f"R$ {x:,.2f}")
 
-        st.markdown("---")
+st.dataframe(
+    df_exibicao,
+    use_container_width=True,
+    hide_index=True,
+)
 
-        # GRÁFICOS (AZUL MARCANTE E FONTES GRANDES)
-        col_g1, col_g2 = st.columns([1.5, 1])
-
-        with col_g1:
-            st.subheader("Gastos por Categoria")
-            if 'Categoria' in df_filtrado.columns and not df_filtrado.empty:
-                df_cat = df_filtrado.groupby('Categoria', as_index=False)['Valor Numérico'].sum()
-                df_cat = df_cat.sort_values(by='Valor Numérico', ascending=False)
-                
-                fig_bar = px.bar(
-                    df_cat,
-                    x='Categoria',
-                    y='Valor Numérico',
-                    text='Valor Numérico',
-                    template="plotly_dark",
-                    color_discrete_sequence=['#3b82f6']
-                )
-                fig_bar.update_traces(
-                    texttemplate='R$ %{text:,.2f}',
-                    textposition='outside',
-                    textfont=dict(size=16, color='#ffffff', family='Arial Black')
-                )
-                fig_bar.update_layout(
-                    font=dict(size=14),
-                    xaxis=dict(title="", tickfont=dict(size=14, color='#f8fafc')),
-                    yaxis=dict(title="R$", title_font=dict(size=16), tickfont=dict(size=14)),
-                    height=430
-                )
-                st.plotly_chart(fig_bar, use_container_width=True)
-
-        with col_g2:
-            st.subheader("Gradação (1-Supérfluo a 5-Essencial)")
-            if 'Essencial x Supérfluo' in df_filtrado.columns and not df_filtrado.empty:
-                df_grad = df_filtrado.groupby('Essencial x Supérfluo', as_index=False)['Valor Numérico'].sum()
-                df_grad['Essencial x Supérfluo'] = df_grad['Essencial x Supérfluo'].astype(str)
-                
-                fig_pie = px.pie(
-                    df_grad,
-                    names='Essencial x Supérfluo',
-                    values='Valor Numérico',
-                    hole=0.4,
-                    template="plotly_dark",
-                    color_discrete_sequence=['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6']
-                )
-                fig_pie.update_traces(
-                    textinfo='percent+label',
-                    textfont=dict(size=15, color='#ffffff')
-                )
-                fig_pie.update_layout(
-                    font=dict(size=14),
-                    legend=dict(font=dict(size=14)),
-                    height=430
-                )
-                st.plotly_chart(fig_pie, use_container_width=True)
-
-        st.markdown("---")
-
-        # TABELA DE DADOS DO PERÍODO
-        st.subheader("📋 Lançamentos do Período")
-        cols_to_hide = ['Data_Objeto', 'Valor Numérico']
-        cols_display = [c for c in df_filtrado.columns if c not in cols_to_hide]
-        st.dataframe(df_filtrado[cols_display], use_container_width=True, hide_index=True, height=350)
-    else:
-        st.info("Planilha conectada com sucesso! Insira um novo lançamento na barra lateral.")
+# --- Botão para remover ---
+col_rm1, col_rm2 = st.columns([3, 1])
+with col_rm2:
+    if st.button("🗑️ Limpar Todos os Gastos", use_container_width=True):
+        st.session_state.gastos = pd.DataFrame(columns=["Descrição", "Valor", "Categoria", "Data"])
+        st.rerun()
