@@ -12,6 +12,10 @@ try:
 except ImportError:
     HAS_GSPREAD = False
 
+def formatar_moeda_br(valor):
+    """Formata valor numérico para moeda brasileira (R$ 1.234,56)"""
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
 # -----------------------------------------------------------------------------
 # 1. CONFIGURAÇÃO DA PÁGINA E ESTILOS VISUAIS
 # -----------------------------------------------------------------------------
@@ -302,9 +306,9 @@ else:
         media_pagamento = total_gasto / qtd_pagamentos if qtd_pagamentos > 0 else 0.0
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("Total Gasto", f"R$ {total_gasto:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        c1.metric("Total Gasto", formatar_moeda_br(total_gasto))
         c2.metric("Total de Pagamentos", qtd_pagamentos)
-        c3.metric("Média por Pagamento", f"R$ {media_pagamento:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
+        c3.metric("Média por Pagamento", formatar_moeda_br(media_pagamento))
 
         st.markdown("---")
 
@@ -316,17 +320,18 @@ else:
             if 'Categoria' in df_filtrado.columns and not df_filtrado.empty:
                 df_cat = df_filtrado.groupby('Categoria', as_index=False)['Valor Numérico'].sum()
                 df_cat = df_cat.sort_values(by='Valor Numérico', ascending=False)
+                df_cat['Valor Formatado'] = df_cat['Valor Numérico'].apply(formatar_moeda_br)
                 
                 fig_bar = px.bar(
                     df_cat,
                     x='Categoria',
                     y='Valor Numérico',
-                    text='Valor Numérico',
+                    text='Valor Formatado',
                     template="plotly_dark",
                     color_discrete_sequence=['#3b82f6']
                 )
                 fig_bar.update_traces(
-                    texttemplate='R$ %{text:,.2f}',
+                    texttemplate='%{text}',
                     textposition='outside',
                     textfont=dict(size=16, color='#ffffff', family='Arial Black')
                 )
