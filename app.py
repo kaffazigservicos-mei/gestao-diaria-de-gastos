@@ -344,8 +344,12 @@ else:
                 df_grad = df_filtrado.groupby('Essencial x Supérfluo', as_index=False)['Valor Numérico'].sum()
                 df_grad['Essencial x Supérfluo'] = df_grad['Essencial x Supérfluo'].astype(str)
                 
-                # CORREÇÃO: Ordenar em ordem decrescente (5, 4, 3, 2, 1)
-                df_grad = df_grad.sort_values('Essencial x Supérfluo', ascending=False)
+                # CORREÇÃO: Converter para int e ordenar numericamente em ordem decrescente (5, 4, 3, 2, 1)
+                df_grad['Ordem'] = pd.to_numeric(df_grad['Essencial x Supérfluo'], errors='coerce')
+                df_grad = df_grad.sort_values('Ordem', ascending=False)
+                
+                # CORREÇÃO: Forçar ordem no gráfico usando category_orders
+                ordem_categorias = df_grad['Essencial x Supérfluo'].tolist()
                 
                 fig_pie = px.pie(
                     df_grad,
@@ -353,7 +357,8 @@ else:
                     values='Valor Numérico',
                     hole=0.4,
                     template="plotly_dark",
-                    color_discrete_sequence=['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6']
+                    color_discrete_sequence=['#ef4444', '#f97316', '#eab308', '#22c55e', '#14b8a6'],
+                    category_orders={'Essencial x Supérfluo': ordem_categorias}
                 )
                 # CORREÇÃO: Remover números das fatias, mostrar apenas na legenda
                 fig_pie.update_traces(
