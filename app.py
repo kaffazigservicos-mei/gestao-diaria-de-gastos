@@ -1,7 +1,3 @@
---- app.py (原始)
-
-
-+++ app.py (修改后)
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
@@ -12,7 +8,6 @@ st.set_page_config(page_title="Gestão Diária de Gastos", page_icon="💰", lay
 st.title("💰 Gestão Diária de Gastos")
 st.markdown("Controle suas despesas por categoria")
 
-# --- Categorias e cores ---
 CATEGORIAS = [
     "Alimentação", "Transporte", "Moradia", "Saúde",
     "Educação", "Lazer", "Vestuário", "Outros"
@@ -25,7 +20,6 @@ CORES = [
 
 cor_por_categoria = dict(zip(CATEGORIAS, CORES))
 
-# --- Dados iniciais ---
 if "gastos" not in st.session_state:
     st.session_state.gastos = pd.DataFrame([
         {"Descrição": "Supermercado", "Valor": 350.00, "Categoria": "Alimentação", "Data": "2025-01-15"},
@@ -40,7 +34,6 @@ if "gastos" not in st.session_state:
         {"Descrição": "Conta de luz", "Valor": 180.00, "Categoria": "Moradia", "Data": "2025-01-10"},
     ])
 
-# --- Cards de resumo ---
 col1, col2, col3 = st.columns(3)
 total = st.session_state.gastos["Valor"].sum()
 col1.metric("Total de Gastos", f"R$ {total:,.2f}")
@@ -49,10 +42,8 @@ col3.metric("Categorias Utilizadas", st.session_state.gastos["Categoria"].nuniqu
 
 st.markdown("---")
 
-# --- Formulário e Gráfico lado a lado ---
 col_form, col_grafico = st.columns(2)
 
-# --- Formulário ---
 with col_form:
     st.subheader("➕ Adicionar Gasto")
     with st.form("form_gasto", clear_on_submit=True):
@@ -76,7 +67,6 @@ with col_form:
             st.success("Gasto adicionado com sucesso!")
             st.rerun()
 
-# --- Gráfico de Pizza ---
 with col_grafico:
     st.subheader("📊 Gastos por Categoria")
 
@@ -88,10 +78,7 @@ with col_grafico:
     )
 
     if not dados_categoria.empty:
-        # Monta listas de cores na mesma ordem dos dados
         cores_grafico = [cor_por_categoria.get(cat, "#999999") for cat in dados_categoria["Categoria"]]
-
-        # Monta os textos da legenda: "Nome da Categoria"
         labels_legenda = dados_categoria["Categoria"].tolist()
 
         fig = go.Figure(data=[go.Pie(
@@ -99,11 +86,7 @@ with col_grafico:
             values=dados_categoria["Valor"],
             hole=0.4,
             marker=dict(colors=cores_grafico),
-            # SEM números no gráfico — apenas a cor da fatia
             textinfo="none",
-            # Legenda mostra o NOME da categoria (não números)
-            textposition="inside",
-            insidetextorientation="radial",
         )])
 
         fig.update_layout(
@@ -122,7 +105,6 @@ with col_grafico:
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # Tabela resumo por categoria
         dados_categoria["Percentual"] = (dados_categoria["Valor"] / total * 100).round(1)
         dados_categoria = dados_categoria.sort_values("Valor", ascending=False)
 
@@ -140,7 +122,6 @@ with col_grafico:
 
 st.markdown("---")
 
-# --- Lista de Gastos ---
 st.subheader("📋 Lista de Gastos")
 
 df_exibicao = st.session_state.gastos.copy()
@@ -153,7 +134,6 @@ st.dataframe(
     hide_index=True,
 )
 
-# --- Botão para remover ---
 col_rm1, col_rm2 = st.columns([3, 1])
 with col_rm2:
     if st.button("🗑️ Limpar Todos os Gastos", use_container_width=True):
